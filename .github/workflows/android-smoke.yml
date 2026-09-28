@@ -40,6 +40,10 @@ jobs:
           set -euo pipefail
           export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
           printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/rwadar-android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'ANDROID_USER_HOME=%s\nANDROID_AVD_HOME=%s\n' "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
           test -c /dev/kvm
           # Narrow grant on this disposable runner only; no account permission changes.
           if ! test -r /dev/kvm || ! test -w /dev/kvm; then
@@ -48,7 +52,9 @@ jobs:
           # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
           timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
           command -v adb
-          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar_smoke.avd"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee evidence/avds.txt
+          grep -Fx 'rwadar_smoke' evidence/avds.txt
           "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
           timeout 180 adb wait-for-device
           timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
