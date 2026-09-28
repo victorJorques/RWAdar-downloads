@@ -38,13 +38,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
           test -c /dev/kvm
           # Narrow grant on this disposable runner only; no account permission changes.
           if ! test -r /dev/kvm || ! test -w /dev/kvm; then
             sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           fi
           # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
-          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          command -v adb
           printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6
           "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
           timeout 180 adb wait-for-device
