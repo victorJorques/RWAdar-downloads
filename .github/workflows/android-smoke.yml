@@ -50,7 +50,7 @@ jobs:
             sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           fi
           # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
-          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
           command -v adb
           printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar_smoke.avd"
           "$ANDROID_HOME/emulator/emulator" -list-avds | tee evidence/avds.txt
@@ -60,7 +60,88 @@ jobs:
           timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
           adb shell input keyevent KEYCODE_WAKEUP
           adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
           adb install --no-streaming rwadar.apk
+      - name: Compile a disposable UI snapshot test harness, never modify the product APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stock uiautomator dump waits for idle and can leave a stale file on animated screens.
+          # Use the documented Instrumentation/UiAutomation APIs to read the current tree directly.
+          # This helper has no activity, network permission, product code, credentials or private key.
+          mkdir -p ui-helper/classes ui-helper/dex
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('ui-helper/AndroidManifest.xml').write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.rwadar.smoketest">
+            <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35"/>
+            <application android:label="RWAdar CI snapshot" android:allowBackup="false"/>
+            <instrumentation android:name="com.rwadar.smoketest.DumpRunner" android:targetPackage="com.rwadar.smoketest"/>
+          </manifest>''', encoding='utf-8')
+          Path('ui-helper/DumpRunner.java').write_text(r'''package com.rwadar.smoketest;
+          import android.app.Instrumentation;
+          import android.app.UiAutomation;
+          import android.graphics.Rect;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.util.Xml;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import java.io.StringWriter;
+          import org.xmlpull.v1.XmlSerializer;
+          public final class DumpRunner extends Instrumentation {
+            @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+            private static String value(CharSequence value) { return value == null ? "" : value.toString(); }
+            private static void node(XmlSerializer xml, AccessibilityNodeInfo info, int depth) throws Exception {
+              if (depth > 100) throw new IllegalStateException("Hierarchy too deep");
+              Rect bounds = new Rect(); info.getBoundsInScreen(bounds);
+              xml.startTag(null, "node");
+              xml.attribute(null, "text", value(info.getText()));
+              xml.attribute(null, "content-desc", value(info.getContentDescription()));
+              xml.attribute(null, "package", value(info.getPackageName()));
+              xml.attribute(null, "class", value(info.getClassName()));
+              xml.attribute(null, "clickable", Boolean.toString(info.isClickable()));
+              xml.attribute(null, "enabled", Boolean.toString(info.isEnabled()));
+              xml.attribute(null, "visible", Boolean.toString(info.isVisibleToUser()));
+              xml.attribute(null, "bounds", "["+bounds.left+","+bounds.top+"]["+bounds.right+","+bounds.bottom+"]");
+              for (int i=0; i<info.getChildCount(); i++) {
+                AccessibilityNodeInfo child = info.getChild(i);
+                if (child != null) { node(xml, child, depth+1); child.recycle(); }
+              }
+              xml.endTag(null, "node");
+            }
+            @Override public void onStart() {
+              Bundle result = new Bundle();
+              try {
+                UiAutomation automation = getUiAutomation();
+                AccessibilityNodeInfo root = null;
+                long deadline = SystemClock.uptimeMillis()+5000;
+                while (root == null && SystemClock.uptimeMillis() < deadline) {
+                  root = automation.getRootInActiveWindow();
+                  if (root == null) SystemClock.sleep(100);
+                }
+                if (root == null) throw new IllegalStateException("No active UI root");
+                StringWriter writer = new StringWriter(); XmlSerializer xml = Xml.newSerializer();
+                xml.setOutput(writer); xml.startDocument("UTF-8", true);
+                xml.startTag(null, "hierarchy"); node(xml, root, 0); xml.endTag(null, "hierarchy");
+                xml.endDocument(); root.recycle();
+                result.putString("rwadar_ui", writer.toString()); finish(-1, result);
+              } catch (Throwable error) {
+                result.putString("rwadar_error", error.toString()); finish(1, result);
+              }
+            }
+          }''', encoding='utf-8')
+          PY
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          javac --release 8 -classpath "$ANDROID_JAR" -d ui-helper/classes ui-helper/DumpRunner.java
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 24 --output ui-helper/dex ui-helper/classes/com/rwadar/smoketest/DumpRunner.class
+          "$BUILD_TOOLS/aapt" package -f -M ui-helper/AndroidManifest.xml -I "$ANDROID_JAR" -F ui-helper/unsigned.apk
+          zip -j ui-helper/unsigned.apk ui-helper/dex/classes.dex
+          "$BUILD_TOOLS/zipalign" -f 4 ui-helper/unsigned.apk ui-helper/aligned.apk
+          keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
+          "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
+          adb install --no-streaming ui-helper/test.apk
       - name: Launch the installed APK and assert the live catalog
         shell: bash
         run: |
@@ -71,8 +152,11 @@ jobs:
           def adb(*args, timeout=20):
               return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
           def dump():
-              adb('shell', 'uiautomator', 'dump', '/sdcard/rwadar-ui.xml')
-              xml = adb('shell', 'cat', '/sdcard/rwadar-ui.xml')
+              raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=30)
+              out.joinpath('latest-ui-instrumentation.txt').write_text(raw, encoding='utf-8')
+              marker = 'INSTRUMENTATION_RESULT: rwadar_ui='
+              assert marker in raw, 'Fresh UI snapshot failed: ' + raw[-1200:]
+              xml = raw.split(marker, 1)[1].split('\nINSTRUMENTATION_', 1)[0].strip()
               ET.fromstring(xml)
               return xml
           def wait_ui(*texts):
@@ -84,8 +168,9 @@ jobs:
                       out.joinpath('latest-ui.xml').write_text(last, encoding='utf-8')
                       if all(text in last for text in texts):
                           return ET.fromstring(last)
-                  except (subprocess.SubprocessError, ET.ParseError):
-                      pass
+                  except (subprocess.SubprocessError, ET.ParseError) as error:
+                      with out.joinpath('snapshot-errors.log').open('a', encoding='utf-8') as log:
+                          log.write(str(error) + '\n')
                   time.sleep(2)
               raise AssertionError('Native UI did not show: ' + ', '.join(texts))
           def screen(name):
@@ -96,7 +181,7 @@ jobs:
               candidates = []
               for node in root.iter('node'):
                   values = [node.get('content-desc', ''), node.get('text', '')]
-                  if any(v.startswith(label) if starts else v == label for v in values):
+                  if node.get('visible') != 'false' and any(v.startswith(label) if starts else v == label for v in values):
                       candidates.append(node)
               candidates.sort(key=lambda n: n.get('clickable') != 'true')
               for node in candidates:
