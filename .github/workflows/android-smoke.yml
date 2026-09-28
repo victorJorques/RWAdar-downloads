@@ -1,0 +1,144 @@
+name: RWAdar APK8 - Android smoke
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk8-smoke
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      APK_URL: https://expo.dev/artifacts/eas/6QSMbgbA-XGWMLGArzYC9MKh6GjouJvOtq1n4_otR7Y.apk
+      APK_SHA256: 593099b7c23d420da0aa361d74d4760b6e73368089849a57887489e7cfb1a255
+      CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+    steps:
+      - name: Download the exact public APK and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
+          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 "$APK_URL" -o rwadar.apk
+          printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > evidence/signature.txt
+          grep -F "$CERT_SHA256" evidence/signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > evidence/package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='8' versionName='1.1.0'" evidence/package.txt
+          test "$(grep -c '^uses-permission:' evidence/package.txt)" = 4
+          grep '^uses-permission:' evidence/package.txt | grep -Ev "name='(android.permission.(INTERNET|ACCESS_NETWORK_STATE|VIBRATE)|com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION)'" > evidence/unexpected-permissions.txt || true
+          test ! -s evidence/unexpected-permissions.txt
+          if grep -Eq "uses-permission:.*(SYSTEM_ALERT_WINDOW|RECEIVE_BOOT_COMPLETED|USE_BIOMETRIC|USE_FINGERPRINT|POST_NOTIFICATIONS|RECORD_AUDIO|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE)" evidence/package.txt; then
+            exit 1
+          fi
+      - name: Prepare official Android emulator on an ephemeral runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -c /dev/kvm
+          # Narrow grant on this disposable runner only; no account permission changes.
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+          # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
+          timeout 180 adb wait-for-device
+          timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb install --no-streaming rwadar.apk
+      - name: Launch the installed APK and assert the live catalog
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, re, subprocess, time, xml.etree.ElementTree as ET
+          out = pathlib.Path('evidence')
+          def adb(*args, timeout=20):
+              return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
+          def dump():
+              adb('shell', 'uiautomator', 'dump', '/sdcard/rwadar-ui.xml')
+              xml = adb('shell', 'cat', '/sdcard/rwadar-ui.xml')
+              ET.fromstring(xml)
+              return xml
+          def wait_ui(*texts):
+              deadline = time.monotonic() + 75
+              last = ''
+              while time.monotonic() < deadline:
+                  try:
+                      last = dump()
+                      out.joinpath('latest-ui.xml').write_text(last, encoding='utf-8')
+                      if all(text in last for text in texts):
+                          return ET.fromstring(last)
+                  except (subprocess.SubprocessError, ET.ParseError):
+                      pass
+                  time.sleep(2)
+              raise AssertionError('Native UI did not show: ' + ', '.join(texts))
+          def screen(name):
+              image = subprocess.run(['adb', 'exec-out', 'screencap', '-p'], check=True, capture_output=True, timeout=20).stdout
+              assert image.startswith(b'\x89PNG'), 'Screenshot must be a real PNG'
+              out.joinpath(name + '.png').write_bytes(image)
+          def tap_observed(root, label, starts=False):
+              candidates = []
+              for node in root.iter('node'):
+                  values = [node.get('content-desc', ''), node.get('text', '')]
+                  if any(v.startswith(label) if starts else v == label for v in values):
+                      candidates.append(node)
+              candidates.sort(key=lambda n: n.get('clickable') != 'true')
+              for node in candidates:
+                  numbers = list(map(int, re.findall(r'\d+', node.get('bounds', ''))))
+                  if len(numbers) == 4 and numbers[2] > numbers[0] and numbers[3] > numbers[1]:
+                      adb('shell', 'input', 'tap', str((numbers[0]+numbers[2])//2), str((numbers[1]+numbers[3])//2))
+                      return
+              raise AssertionError('Accessible control not found: ' + label)
+          launch = adb('shell', 'am', 'start', '-W', '-n', 'com.rwadar.app/.MainActivity')
+          out.joinpath('launch.txt').write_text(launch, encoding='utf-8')
+          assert 'Status: ok' in launch, launch
+          root = wait_ui('Explora lo verificado', '26 plataformas')
+          screen('01-radar-live-catalog')
+          tap_observed(root, 'Ofertas')
+          root = wait_ui('Ofertas específicas', '28 fichas')
+          screen('02-offers')
+          tap_observed(root, 'Buscar ofertas por nombre, proveedor, país o métrica')
+          adb('shell', 'input', 'text', 'Spiko')
+          adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+          root = wait_ui('Spiko Letras del Tesoro Euro')
+          screen('03-filter-spiko')
+          tap_observed(root, 'Spiko Letras del Tesoro Euro.', starts=True)
+          wait_ui('Cerrar Spiko Letras del Tesoro Euro', 'Spiko')
+          screen('04-offer-detail')
+          pid = adb('shell', 'pidof', 'com.rwadar.app').strip()
+          assert pid, 'App process must remain alive'
+          logs = adb('logcat', '-d', '-v', 'threadtime', 'AndroidRuntime:E', 'ReactNativeJS:E', '*:S')
+          out.joinpath('app-errors.log').write_text(logs, encoding='utf-8')
+          assert 'FATAL EXCEPTION' not in logs, 'Android crash recorded'
+          assert not re.search(r'ReactNativeJS.*(?:Error:|TypeError|ReferenceError|Invariant Violation)', logs), 'JavaScript error recorded'
+          result = {'package':'com.rwadar.app', 'version':'1.1.0', 'versionCode':8,
+                    'androidApi':35, 'installation':True, 'launch':True,
+                    'freshInstallLiveCatalogPlatforms':26, 'offers':28,
+                    'searchAndDetail':True, 'physicalDevice':False}
+          out.joinpath('result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+          print(json.dumps(result))
+          PY
+      - name: Capture final emulator state and stop the disposable device
+        if: always()
+        shell: bash
+        run: |
+          if adb get-state >/dev/null 2>&1; then
+            adb exec-out screencap -p > evidence/final-state.png || true
+            adb logcat -d -v threadtime AndroidRuntime:E ReactNativeJS:E '*:S' > evidence/final-errors.log || true
+            adb emu kill || true
+          fi
+      - name: Retain only test evidence, not the APK or private source
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rwadar-android-apk8-smoke
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
