@@ -1,0 +1,529 @@
+name: RWAdar APK10 - four Play preparation captures
+run-name: RWAdar APK10 captures 1080x1920 0e06d6c4f8e32048fc761b8630467dd91b5a57940f577263571c7915fdd5b574
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk10-captures-play
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      APK_URL: https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.1.2/RWAdar.apk
+      APK_SHA256: 0e06d6c4f8e32048fc761b8630467dd91b5a57940f577263571c7915fdd5b574
+      APK_BYTES: '85274516'
+      CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      HEAD_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Download and verify the already public immutable APK10
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work
+          [[ "$APK_URL" == 'https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.1.2/RWAdar.apk' ]]
+          [[ "$APK_SHA256" == '0e06d6c4f8e32048fc761b8630467dd91b5a57940f577263571c7915fdd5b574' && "$APK_BYTES" == '85274516' ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize 85274516 --retry 2 "$APK_URL" -o rwadar.apk
+          test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
+          printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > work/signature.txt
+          grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" work/signature.txt
+          grep -Fx 'Number of signers: 1' work/signature.txt
+          grep -Fx 'Verified using v2 scheme (APK Signature Scheme v2): true' work/signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > work/package.txt
+          python3 - <<'PY'
+          import pathlib, re
+          text = pathlib.Path('work/package.txt').read_text()
+          assert "package: name='com.rwadar.app' versionCode='10' versionName='1.1.2'" in text
+          assert "sdkVersion:'24'" in text and "targetSdkVersion:'36'" in text
+          permissions = re.findall(r"^uses-permission: name='([^']+)'", text, re.M)
+          assert sorted(permissions) == sorted(['android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE', 'android.permission.VIBRATE', 'com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'])
+          PY
+      - name: Prepare official Android emulator on an ephemeral runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/rwadar-android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'ANDROID_USER_HOME=%s\nANDROID_AVD_HOME=%s\n' "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          test -c /dev/kvm
+          # Narrow grant on this disposable runner only; no account permission changes.
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+          # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          command -v adb
+          "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" list device > work/devices.txt
+          grep -F '"pixel_2"' work/devices.txt
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_capture_112 -k 'system-images;android-35;default;x86_64' --device pixel_2 --path "$ANDROID_AVD_HOME/rwadar_capture_112.avd"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee work/avds.txt
+          grep -Fx 'rwadar_capture_112' work/avds.txt
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar_capture_112 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > work/emulator.log 2>&1 &
+          timeout 180 adb wait-for-device
+          timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          test "$(adb shell wm size | tr -d '\r')" = 'Physical size: 1080x1920'
+          adb shell settings put system accelerometer_rotation 0
+          adb shell settings put system user_rotation 0
+          adb install --no-streaming rwadar.apk
+      - name: Compile a disposable UI snapshot test harness, never modify the product APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stock uiautomator dump waits for idle and can leave a stale file on animated screens.
+          # Use the documented Instrumentation/UiAutomation APIs to read the current tree directly.
+          # This helper has no activity, network permission, product code, credentials or private key.
+          mkdir -p ui-helper/classes ui-helper/dex
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('ui-helper/AndroidManifest.xml').write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.rwadar.smoketest">
+            <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35"/>
+            <application android:label="RWAdar CI snapshot" android:allowBackup="false"/>
+            <instrumentation android:name="com.rwadar.smoketest.DumpRunner" android:targetPackage="com.rwadar.smoketest"/>
+          </manifest>''', encoding='utf-8')
+          Path('ui-helper/DumpRunner.java').write_text(r'''package com.rwadar.smoketest;
+          import android.app.Instrumentation;
+          import android.app.UiAutomation;
+          import android.graphics.Rect;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.util.Xml;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import java.io.StringWriter;
+          import org.xmlpull.v1.XmlSerializer;
+          public final class DumpRunner extends Instrumentation {
+            @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+            private static String value(CharSequence value) { return value == null ? "" : value.toString(); }
+            private static void node(XmlSerializer xml, AccessibilityNodeInfo info, int depth) throws Exception {
+              if (depth > 100) throw new IllegalStateException("Hierarchy too deep");
+              Rect bounds = new Rect(); info.getBoundsInScreen(bounds);
+              xml.startTag(null, "node");
+              xml.attribute(null, "text", value(info.getText()));
+              xml.attribute(null, "content-desc", value(info.getContentDescription()));
+              xml.attribute(null, "package", value(info.getPackageName()));
+              xml.attribute(null, "class", value(info.getClassName()));
+              xml.attribute(null, "clickable", Boolean.toString(info.isClickable()));
+              xml.attribute(null, "enabled", Boolean.toString(info.isEnabled()));
+              xml.attribute(null, "visible", Boolean.toString(info.isVisibleToUser()));
+              xml.attribute(null, "bounds", "["+bounds.left+","+bounds.top+"]["+bounds.right+","+bounds.bottom+"]");
+              for (int i=0; i<info.getChildCount(); i++) {
+                AccessibilityNodeInfo child = info.getChild(i);
+                if (child != null) { node(xml, child, depth+1); child.recycle(); }
+              }
+              xml.endTag(null, "node");
+            }
+            @Override public void onStart() {
+              Bundle result = new Bundle();
+              try {
+                UiAutomation automation = getUiAutomation();
+                AccessibilityNodeInfo root = null;
+                long deadline = SystemClock.uptimeMillis()+5000;
+                while (root == null && SystemClock.uptimeMillis() < deadline) {
+                  root = automation.getRootInActiveWindow();
+                  if (root == null) SystemClock.sleep(100);
+                }
+                if (root == null) throw new IllegalStateException("No active UI root");
+                StringWriter writer = new StringWriter(); XmlSerializer xml = Xml.newSerializer();
+                xml.setOutput(writer); xml.startDocument("UTF-8", true);
+                xml.startTag(null, "hierarchy"); node(xml, root, 0); xml.endTag(null, "hierarchy");
+                xml.endDocument(); root.recycle();
+                result.putString("rwadar_ui", writer.toString()); finish(-1, result);
+              } catch (Throwable error) {
+                result.putString("rwadar_error", error.toString()); finish(1, result);
+              }
+            }
+          }''', encoding='utf-8')
+          PY
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          javac --release 8 -classpath "$ANDROID_JAR" -d ui-helper/classes ui-helper/DumpRunner.java
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 24 --output ui-helper/dex ui-helper/classes/com/rwadar/smoketest/DumpRunner.class
+          "$BUILD_TOOLS/aapt" package -f -M ui-helper/AndroidManifest.xml -I "$ANDROID_JAR" -F ui-helper/unsigned.apk
+          zip -j ui-helper/unsigned.apk ui-helper/dex/classes.dex
+          "$BUILD_TOOLS/zipalign" -f 4 ui-helper/unsigned.apk ui-helper/aligned.apk
+          keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
+          "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
+          adb install --no-streaming ui-helper/test.apk
+      - name: Capture only radar, main collection, secondary collection and dated detail
+        shell: bash
+        run: |
+          set -euo pipefail
+          # BEGIN capturas-112.py
+          python3 - <<'PY'
+          """Four real UI captures of the already published APK; no product modification."""
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import struct
+          import subprocess
+          import time
+          import xml.etree.ElementTree as ET
+          
+          work = pathlib.Path('work')
+          out = pathlib.Path('evidence')
+          WIDTH, HEIGHT = 1080, 1920
+          captures = {}
+          
+          
+          class TransientSnapshotError(Exception):
+              pass
+          
+          
+          def adb(*args, timeout=20):
+              return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
+          
+          
+          def dump_once(timeout=30):
+              raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=timeout)
+              marker = 'INSTRUMENTATION_RESULT: rwadar_ui='
+              if marker not in raw and 'No active UI root' in raw:
+                  raise TransientSnapshotError('UiAutomation has no active root during a window transition')
+              assert marker in raw, 'Fresh UI snapshot failed'
+              root = ET.fromstring(raw.split(marker, 1)[1].split('\nINSTRUMENTATION_', 1)[0].strip())
+              window = root.find('node')
+              if window is None or window.get('package') != 'com.rwadar.app':
+                  raise TransientSnapshotError('Product window is not active during a transition')
+              return root
+          
+          
+          def dump(timeout=30):
+              deadline = time.monotonic() + timeout
+              while True:
+                  try:
+                      return dump_once(timeout=max(.1, deadline - time.monotonic()))
+                  except TransientSnapshotError:
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          raise
+                      time.sleep(min(2, remaining))
+          
+          
+          def bounds(node):
+              return list(map(int, re.findall(r'-?\d+', node.get('bounds', ''))))
+          
+          
+          def visible(node, fully=False):
+              b = bounds(node)
+              if node.get('visible') != 'true' or len(b) != 4:
+                  return False
+              left, top, right, bottom = b
+              if fully:
+                  return 0 <= left < right <= WIDTH and 0 <= top < bottom <= HEIGHT
+              return right > max(0, left) and bottom > max(0, top) and left < WIDTH and top < HEIGHT
+          
+          
+          def visible_text(root):
+              return '\n'.join(value for node in root.iter('node') if visible(node)
+                               for value in (node.get('text', ''), node.get('content-desc', '')) if value)
+          
+          
+          def wait_ui(*texts, timeout=75):
+              deadline = time.monotonic() + timeout
+              while time.monotonic() < deadline:
+                  try:
+                      root = dump(timeout=min(30, max(.1, deadline - time.monotonic())))
+                      if all(text in visible_text(root) for text in texts):
+                          return root
+                  except (subprocess.SubprocessError, ET.ParseError, TransientSnapshotError):
+                      pass
+                  time.sleep(2)
+              raise AssertionError('Native UI did not visibly show required capture state')
+          
+          
+          def find_node(root, label, starts=False):
+              candidates = [node for node in root.iter('node') if node.get('package') == 'com.rwadar.app' and visible(node, fully=True)
+                            and any(v.startswith(label) if starts else v == label
+                                    for v in (node.get('content-desc', ''), node.get('text', '')))]
+              candidates.sort(key=lambda n: n.get('clickable') != 'true')
+              assert candidates, 'Accessible control not visible: ' + label
+              return candidates[0], bounds(candidates[0])
+          
+          
+          def tap_observed(root, label, starts=False):
+              # Only these local navigation controls are reachable in this script.
+              assert label in ('Ofertas', 'Mostrar secundario 21', 'Buscar ofertas por nombre, proveedor, país o métrica', 'Miami 1.')
+              node, b = find_node(root, label, starts)
+              adb('shell', 'input', 'tap', str((b[0] + b[2]) // 2), str((b[1] + b[3]) // 2))
+              return node
+          
+          
+          def assert_catalog(root):
+              text = visible_text(root)
+              match = re.search(r'(\d+) principales · (\d+) secundarias · (\d+) en camino', text)
+              assert match and tuple(map(int, match.groups())) == (24, 21, 4), 'Partial/unexpected catalog'
+              assert not any(term in text.lower() for term in ('28 fichas', 'fixture local', 'copia sin conexión', 'catálogo no disponible')), 'No stale/V1/local fallback'
+              for control in ('Mostrar principales 24', 'Mostrar secundario 21', 'Mostrar en camino 4'):
+                  find_node(root, control)
+          
+          
+          def screen(name, root):
+              assert name in ('01-radar', '02-principales', '03-secundario', '04-detalle-fechado') and name not in captures
+              image = subprocess.run(['adb', 'exec-out', 'screencap', '-p'], check=True, capture_output=True, timeout=20).stdout
+              assert image[:8] == b'\x89PNG\r\n\x1a\n' and image[12:16] == b'IHDR'
+              assert struct.unpack_from('>II', image, 16) == (WIDTH, HEIGHT), 'Wrong screenshot geometry'
+              assert image[24:26] == bytes((8, 6)), 'Expected real RGBA8 adb capture'
+              xml = ET.tostring(root, encoding='utf-8')
+              (work / 'raw' / (name + '.png')).write_bytes(image)
+              (out / (name + '.xml')).write_bytes(xml)
+              captures[name] = {'capturedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                                'rawSha256': hashlib.sha256(image).hexdigest(), 'xmlSha256': hashlib.sha256(xml).hexdigest()}
+          
+          
+          def main():
+              assert not out.exists() or not any(out.iterdir()), 'Evidence directory must be empty'
+              out.mkdir(exist_ok=True)
+              (work / 'raw').mkdir(parents=True, exist_ok=False)
+              size = adb('shell', 'wm', 'size').strip()
+              assert size == 'Physical size: 1080x1920', 'Require physical geometry without wm override'
+              assert 'Status: ok' in adb('shell', 'am', 'start', '-W', '-n', 'com.rwadar.app/.MainActivity')
+              root = wait_ui('Explora lo verificado', '26 plataformas')
+              assert 'copia sin conexión' not in visible_text(root).lower()
+              time.sleep(1)
+              root = wait_ui('Explora lo verificado', '26 plataformas')
+              screen('01-radar', root)
+              tap_observed(root, 'Ofertas')
+              root = wait_ui('Ofertas específicas', '24 fichas', '24 principales · 21 secundarias · 4 en camino')
+              assert_catalog(root)
+              screen('02-principales', root)
+              tap_observed(root, 'Mostrar secundario 21')
+              root = wait_ui('21 fichas', 'No confirman precio, liquidez ni disponibilidad actuales.')
+              assert_catalog(root)
+              screen('03-secundario', root)
+              tap_observed(root, 'Buscar ofertas por nombre, proveedor, país o métrica')
+              adb('shell', 'input', 'text', 'Miami%s1')
+              adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+              root = wait_ui('Miami 1', '1 ficha')
+              node, _ = find_node(root, 'Miami 1.', starts=True)
+              label = node.get('content-desc', '')
+              assert 'REFERENCIA DOCUMENTAL: Consultar fuente' in label and 'Referencia documental · liquidez no confirmada' in label
+              assert not re.search(r'\d[\d.,]*\s*(?:%|EUR|CHF|USD|€|\$)', label), 'Commercial figure in documentary card'
+              tap_observed(root, 'Miami 1.', starts=True)
+              root = wait_ui('Cerrar Miami 1')
+              required = {'REFERENCIA · SECUNDARIO', 'FICHA DOCUMENTADA', 'REFERENCIAS FECHADAS', 'No son precios actuales',
+                          '14,88 %', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026', 'No se ha revalidado el libro de órdenes'}
+              shot_tokens = ('14,88 %', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026')
+              for _ in range(40):
+                  root = dump()
+                  text = visible_text(root)
+                  assert not any(term in text for term in ('Disponible desde España en la fecha verificada', 'Ver oferta en', 'Ver mercado en', 'RENTABILIDAD PUBLICADA')), 'Unexpected commercial detail'
+                  required -= {term for term in required if term in text}
+                  # Dates/value must be individual, fully on-screen text nodes, not an off-screen merged accessibility label.
+                  on_screen = '\n'.join(node.get('text', '') for node in root.iter('node') if visible(node, fully=True))
+                  if '04-detalle-fechado' not in captures and all(term in on_screen for term in shot_tokens):
+                      screen('04-detalle-fechado', root)
+                  if not required and '04-detalle-fechado' in captures:
+                      break
+                  adb('shell', 'input', 'swipe', '540', '1536', '540', '768', '450')
+                  time.sleep(.5)
+              assert not required and '04-detalle-fechado' in captures, 'Dated detail could not be verified/captured'
+              assert adb('shell', 'pidof', 'com.rwadar.app').strip(), 'App must remain alive'
+              logs = adb('logcat', '-d', '-v', 'threadtime', 'AndroidRuntime:E', 'ReactNativeJS:E', '*:S')
+              assert not re.search(r'AndroidRuntime|ReactNativeJS', logs), 'Native/JS error detected'
+              meta = {'physicalSize': [WIDTH, HEIGHT], 'platforms': 26, 'collections': {'principales': 24, 'secundario': 21, 'en_camino': 4},
+                      'captures': captures, 'nativeErrorsEmpty': True, 'workflowSha': os.environ['WORKFLOW_SHA'],
+                      'headSha': os.environ['HEAD_SHA'], 'runId': os.environ['RUN_ID']}
+              (work / 'captures.json').write_text(json.dumps(meta, indent=2), encoding='utf-8')
+              print(json.dumps({'scope': 'screenshots-only', 'captures': 4, 'platforms': 26, 'offers': 49, 'collections': meta['collections']}))
+          
+          
+          if __name__ == '__main__':
+              main()
+          PY
+          # END capturas-112.py
+      - name: Encode RGB without changing pixels and enforce the bounded evidence manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          # BEGIN preparar_png_play.py
+          python3 - <<'PY'
+          """Lossless RGBA8 -> RGB8 packaging for the four real adb captures; stdlib only."""
+          import hashlib
+          import json
+          import pathlib
+          import struct
+          import sys
+          import zlib
+          
+          NAMES = ('01-radar', '02-principales', '03-secundario', '04-detalle-fechado')
+          PNG = b'\x89PNG\r\n\x1a\n'
+          MAX_ARTIFACT = 10 * 1024 * 1024
+          MAX_EXPANDED = 1080 * 1920 * 4 + 1920
+          SHA = '0e06d6c4f8e32048fc761b8630467dd91b5a57940f577263571c7915fdd5b574'
+          CERT = 'f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72'
+          
+          
+          def require(condition, message):
+              if not condition:
+                  raise ValueError(message)
+          
+          
+          def digest(data):
+              return hashlib.sha256(data).hexdigest()
+          
+          
+          def chunk(kind, data):
+              return struct.pack('>I', len(data)) + kind + data + struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff)
+          
+          
+          def paeth(a, b, c):
+              p = a + b - c
+              da, db, dc = abs(p - a), abs(p - b), abs(p - c)
+              return a if da <= db and da <= dc else b if db <= dc else c
+          
+          
+          def decode_png(data):
+              require(data.startswith(PNG) and len(data) <= MAX_ARTIFACT, 'Not a bounded PNG')
+              at, chunks, ended = 8, [], False
+              while at < len(data):
+                  require(at + 12 <= len(data), 'Truncated PNG chunk')
+                  length = struct.unpack_from('>I', data, at)[0]
+                  kind = data[at + 4:at + 8]
+                  require(at + length + 12 <= len(data), 'Truncated PNG payload')
+                  value = data[at + 8:at + 8 + length]
+                  crc = struct.unpack_from('>I', data, at + 8 + length)[0]
+                  require(crc == zlib.crc32(kind + value) & 0xffffffff, 'PNG CRC mismatch')
+                  require(not ended, 'Trailing PNG chunks')
+                  chunks.append((kind, value))
+                  at += length + 12
+                  if kind == b'IEND':
+                      require(not value and at == len(data), 'Invalid PNG end')
+                      ended = True
+              require(ended and chunks[0][0] == b'IHDR' and len(chunks[0][1]) == 13, 'Missing PNG header/end')
+              require(sum(kind == b'IHDR' for kind, _ in chunks) == 1, 'Duplicate PNG header')
+              width, height, depth, color, compression, filtering, interlace = struct.unpack('>IIBBBBB', chunks[0][1])
+              require(0 < width <= 1080 and 0 < height <= 1920, 'Unexpected PNG dimensions')
+              require(depth == 8 and color in (2, 6) and (compression, filtering, interlace) == (0, 0, 0), 'Expected noninterlaced RGB/RGBA8 PNG')
+              supported = (b'IHDR', b'IDAT', b'IEND', b'sRGB', b'gAMA', b'cHRM', b'iCCP', b'sBIT', b'pHYs', b'bKGD')
+              require(all(kind in supported for kind, _ in chunks), 'Unsupported PNG chunk/color metadata; preserve for review')
+              require(not any(kind in (b'tRNS', b'acTL', b'fcTL', b'fdAT') for kind, _ in chunks), 'Transparency/APNG extension is not allowed')
+              bpp = 4 if color == 6 else 3
+              stride = width * bpp
+              expected = (stride + 1) * height
+              require(expected <= MAX_EXPANDED, 'Expanded PNG exceeds bound')
+              compressed = b''.join(value for kind, value in chunks if kind == b'IDAT')
+              inflater = zlib.decompressobj()
+              filtered = inflater.decompress(compressed, expected + 1)
+              require(inflater.eof and not inflater.unused_data and not inflater.unconsumed_tail and len(filtered) == expected, 'Invalid or oversized PNG stream')
+              pixels = bytearray()
+              previous = bytearray(stride)
+              for y in range(height):
+                  offset = y * (stride + 1)
+                  mode = filtered[offset]
+                  require(mode <= 4, 'Unsupported PNG filter')
+                  row = bytearray(filtered[offset + 1:offset + 1 + stride])
+                  for i in range(stride):
+                      left = row[i - bpp] if i >= bpp else 0
+                      up, corner = previous[i], previous[i - bpp] if i >= bpp else 0
+                      predictor = (0, left, up, (left + up) // 2, paeth(left, up, corner))[mode]
+                      row[i] = (row[i] + predictor) & 255
+                  pixels.extend(row)
+                  previous = row
+              return width, height, color, bytes(pixels), chunks
+          
+          
+          def convert(data):
+              width, height, color, pixels, chunks = decode_png(data)
+              require(color == 6, 'adb source must be RGBA8')
+              require(all(alpha == 255 for alpha in pixels[3::4]), 'Non-opaque source: do not composite or retouch')
+              rgb = bytearray(width * height * 3)
+              rgb[0::3], rgb[1::3], rgb[2::3] = pixels[0::4], pixels[1::4], pixels[2::4]
+              header = struct.pack('>IIBBBBB', width, height, 8, 2, 0, 0, 0)
+              colors = []
+              for kind, value in chunks:
+                  if kind in (b'sRGB', b'gAMA', b'cHRM', b'iCCP', b'pHYs', b'bKGD'):
+                      colors.append(chunk(kind, value))
+                  elif kind == b'sBIT':
+                      require(len(value) == 4, 'Unexpected RGBA sBIT')
+                      colors.append(chunk(kind, value[:3]))
+              scanlines = b''.join(b'\x00' + rgb[y * width * 3:(y + 1) * width * 3] for y in range(height))
+              result = PNG + chunk(b'IHDR', header) + b''.join(colors) + chunk(b'IDAT', zlib.compress(scanlines, 9)) + chunk(b'IEND', b'')
+              out_width, out_height, out_color, decoded, _ = decode_png(result)
+              require((out_width, out_height, out_color) == (width, height, 2) and decoded == rgb, 'RGB pixels changed during conversion')
+              return result, digest(rgb)
+          
+          
+          def main():
+              require(len(sys.argv) == 1, 'No path or content overrides accepted')
+              work, evidence = pathlib.Path('work'), pathlib.Path('evidence')
+              observed = json.loads((work / 'captures.json').read_text(encoding='utf-8'))
+              require(observed['physicalSize'] == [1080, 1920] and observed['platforms'] == 26, 'Capture geometry/catalog mismatch')
+              require(observed['collections'] == {'principales': 24, 'secundario': 21, 'en_camino': 4}, 'Unexpected collections')
+              require(set(observed['captures']) == set(NAMES), 'Need exactly four observed captures')
+              require(sorted(p.name for p in evidence.iterdir()) == sorted(name + '.xml' for name in NAMES), 'Unexpected staged evidence')
+              files = []
+              for name in NAMES:
+                  raw = (work / 'raw' / (name + '.png')).read_bytes()
+                  require(digest(raw) == observed['captures'][name]['rawSha256'], 'Raw capture changed')
+                  width, height, color, _, _ = decode_png(raw)
+                  require((width, height, color) == (1080, 1920, 6), 'Capture must be physical 1080x1920 RGBA8')
+                  rgb, pixel_hash = convert(raw)
+                  target = evidence / (name + '.png')
+                  target.write_bytes(rgb)
+                  xml = (evidence / (name + '.xml')).read_bytes()
+                  require(digest(xml) == observed['captures'][name]['xmlSha256'], 'Observed UI XML changed')
+                  files.extend([
+                      {'name': name + '.png', 'bytes': len(rgb), 'sha256': digest(rgb), 'width': 1080, 'height': 1920,
+                       'bitDepth': 8, 'colorType': 2, 'sourceColorType': 6, 'sourceSha256': digest(raw),
+                       'allSourceAlpha255': True, 'rgbPixelsEqual': True, 'rgbPixelSha256': pixel_hash,
+                       'capturedAt': observed['captures'][name]['capturedAt']},
+                      {'name': name + '.xml', 'bytes': len(xml), 'sha256': digest(xml)}])
+              manifest = {'schema': 1, 'scope': 'screenshots-only-not-release-smoke', 'apkUrl': 'https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.1.2/RWAdar.apk',
+                          'apkSha256': SHA, 'apkBytes': 85274516, 'package': 'com.rwadar.app', 'version': '1.1.2', 'versionCode': 10,
+                          'certificateSha256': CERT, 'physicalSize': [1080, 1920], 'pixelFormat': 'RGB8-no-alpha',
+                          'platforms': 26, 'offers': 49, 'collections': observed['collections'], 'noV1CatalogFallback': True,
+                          'detailDatesVisible': True, 'externalLinksOpened': False, 'explainerOpened': False,
+                          'accountsOpened': False, 'commercialActions': False, 'physicalDevice': False,
+                          'nativeErrorsEmpty': observed['nativeErrorsEmpty'], 'workflowSha': observed['workflowSha'],
+                          'headSha': observed['headSha'], 'runId': observed['runId'], 'retentionDays': 1, 'maxArtifactBytes': MAX_ARTIFACT,
+                          'previousReleaseSmokeRunId': '36703760962', 'files': files}
+              (evidence / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+              expected_names = {name + suffix for name in NAMES for suffix in ('.png', '.xml')} | {'manifest.json'}
+              require({p.name for p in evidence.iterdir()} == expected_names, 'Unexpected upload file')
+              require(all(p.is_file() and not p.is_symlink() for p in evidence.iterdir()), 'Only ordinary evidence files allowed')
+              size = sum(p.stat().st_size for p in evidence.iterdir())
+              require(size <= MAX_ARTIFACT - 65536, 'Artifact exceeds 10 MiB including ZIP overhead reserve')
+              print(json.dumps({'captures': 4, 'files': 9, 'uncompressedBytes': size, 'maxArtifactBytes': MAX_ARTIFACT, 'scope': manifest['scope']}))
+          
+          
+          if __name__ == '__main__':
+              main()
+          PY
+          # END preparar_png_play.py
+      - name: Stop the disposable emulator
+        if: always()
+        shell: bash
+        run: adb emu kill >/dev/null 2>&1 || true
+      - name: Retain only the four screenshots, four XML and manifest
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rwadar-apk10-play-captures-1080x1920
+          path: |
+            evidence/01-radar.png
+            evidence/01-radar.xml
+            evidence/02-principales.png
+            evidence/02-principales.xml
+            evidence/03-secundario.png
+            evidence/03-secundario.xml
+            evidence/04-detalle-fechado.png
+            evidence/04-detalle-fechado.xml
+            evidence/manifest.json
+          retention-days: 1
+          compression-level: 9
+          if-no-files-found: error
+          include-hidden-files: false
