@@ -146,7 +146,7 @@ jobs:
               ensure(exe.resolve().is_relative_to(app.resolve()))
               ensure("arm64" in cmd(["lipo", "-archs", str(exe)]).decode().split())
               # codesign material remains captured in memory; no certificate/key creation.
-              signature = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], capture_output=True, timeout=60)
+              signature = subprocess.run(["codesign", "-d", "--entitlements", ":-", "--xml", str(app)], capture_output=True, timeout=60)
               ensure(signature.returncode == 0)
               raw = signature.stdout
               begin = raw.find(b"<?xml")
