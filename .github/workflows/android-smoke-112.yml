@@ -1,0 +1,456 @@
+name: RWAdar APK10 - Android V2 collections smoke
+run-name: RWAdar 1.1.2 APK10 ${{ inputs.apk_sha256 }}
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: Anonymous URL of the new EAS APK10
+        required: true
+        type: string
+      apk_sha256:
+        description: Exact SHA256 of the new 1.1.2 APK10
+        required: true
+        type: string
+      apk_bytes:
+        description: Exact byte size of the new APK10
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk10-smoke
+  cancel-in-progress: false
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      APK_URL: ${{ inputs.apk_url }}
+      APK_SHA256: ${{ inputs.apk_sha256 }}
+      APK_BYTES: ${{ inputs.apk_bytes }}
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      HEAD_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+      CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+    steps:
+      - name: Download the exact public APK and verify identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
+          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$APK_SHA256" != 593099b7c23d420da0aa361d74d4760b6e73368089849a57887489e7cfb1a255 ]]
+          [[ "$APK_SHA256" != 816f07a6d8563ebfb601be6810b564e6ebaeb49f865226ce2112f7635032884b ]]
+          [[ "$APK_BYTES" =~ ^[1-9][0-9]{6,8}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 "$APK_URL" -o rwadar.apk
+          test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
+          printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > evidence/signature.txt
+          grep -F "$CERT_SHA256" evidence/signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > evidence/package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='10' versionName='1.1.2'" evidence/package.txt
+          test "$(grep -c '^uses-permission:' evidence/package.txt)" = 4
+          grep '^uses-permission:' evidence/package.txt | grep -Ev "name='(android.permission.(INTERNET|ACCESS_NETWORK_STATE|VIBRATE)|com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION)'" > evidence/unexpected-permissions.txt || true
+          test ! -s evidence/unexpected-permissions.txt
+          if grep -Eq "uses-permission:.*(SYSTEM_ALERT_WINDOW|RECEIVE_BOOT_COMPLETED|USE_BIOMETRIC|USE_FINGERPRINT|POST_NOTIFICATIONS|RECORD_AUDIO|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE)" evidence/package.txt; then
+            exit 1
+          fi
+      - name: Prepare official Android emulator on an ephemeral runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/rwadar-android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'ANDROID_USER_HOME=%s\nANDROID_AVD_HOME=%s\n' "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          test -c /dev/kvm
+          # Narrow grant on this disposable runner only; no account permission changes.
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+          # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          command -v adb
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar_smoke.avd"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee evidence/avds.txt
+          grep -Fx 'rwadar_smoke' evidence/avds.txt
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
+          timeout 180 adb wait-for-device
+          timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb install --no-streaming rwadar.apk
+      - name: Compile a disposable UI snapshot test harness, never modify the product APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stock uiautomator dump waits for idle and can leave a stale file on animated screens.
+          # Use the documented Instrumentation/UiAutomation APIs to read the current tree directly.
+          # This helper has no activity, network permission, product code, credentials or private key.
+          mkdir -p ui-helper/classes ui-helper/dex
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('ui-helper/AndroidManifest.xml').write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.rwadar.smoketest">
+            <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35"/>
+            <application android:label="RWAdar CI snapshot" android:allowBackup="false"/>
+            <instrumentation android:name="com.rwadar.smoketest.DumpRunner" android:targetPackage="com.rwadar.smoketest"/>
+          </manifest>''', encoding='utf-8')
+          Path('ui-helper/DumpRunner.java').write_text(r'''package com.rwadar.smoketest;
+          import android.app.Instrumentation;
+          import android.app.UiAutomation;
+          import android.graphics.Rect;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.util.Xml;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import java.io.StringWriter;
+          import org.xmlpull.v1.XmlSerializer;
+          public final class DumpRunner extends Instrumentation {
+            @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+            private static String value(CharSequence value) { return value == null ? "" : value.toString(); }
+            private static void node(XmlSerializer xml, AccessibilityNodeInfo info, int depth) throws Exception {
+              if (depth > 100) throw new IllegalStateException("Hierarchy too deep");
+              Rect bounds = new Rect(); info.getBoundsInScreen(bounds);
+              xml.startTag(null, "node");
+              xml.attribute(null, "text", value(info.getText()));
+              xml.attribute(null, "content-desc", value(info.getContentDescription()));
+              xml.attribute(null, "package", value(info.getPackageName()));
+              xml.attribute(null, "class", value(info.getClassName()));
+              xml.attribute(null, "clickable", Boolean.toString(info.isClickable()));
+              xml.attribute(null, "enabled", Boolean.toString(info.isEnabled()));
+              xml.attribute(null, "visible", Boolean.toString(info.isVisibleToUser()));
+              xml.attribute(null, "bounds", "["+bounds.left+","+bounds.top+"]["+bounds.right+","+bounds.bottom+"]");
+              for (int i=0; i<info.getChildCount(); i++) {
+                AccessibilityNodeInfo child = info.getChild(i);
+                if (child != null) { node(xml, child, depth+1); child.recycle(); }
+              }
+              xml.endTag(null, "node");
+            }
+            @Override public void onStart() {
+              Bundle result = new Bundle();
+              try {
+                UiAutomation automation = getUiAutomation();
+                AccessibilityNodeInfo root = null;
+                long deadline = SystemClock.uptimeMillis()+5000;
+                while (root == null && SystemClock.uptimeMillis() < deadline) {
+                  root = automation.getRootInActiveWindow();
+                  if (root == null) SystemClock.sleep(100);
+                }
+                if (root == null) throw new IllegalStateException("No active UI root");
+                StringWriter writer = new StringWriter(); XmlSerializer xml = Xml.newSerializer();
+                xml.setOutput(writer); xml.startDocument("UTF-8", true);
+                xml.startTag(null, "hierarchy"); node(xml, root, 0); xml.endTag(null, "hierarchy");
+                xml.endDocument(); root.recycle();
+                result.putString("rwadar_ui", writer.toString()); finish(-1, result);
+              } catch (Throwable error) {
+                result.putString("rwadar_error", error.toString()); finish(1, result);
+              }
+            }
+          }''', encoding='utf-8')
+          PY
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          javac --release 8 -classpath "$ANDROID_JAR" -d ui-helper/classes ui-helper/DumpRunner.java
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 24 --output ui-helper/dex ui-helper/classes/com/rwadar/smoketest/DumpRunner.class
+          "$BUILD_TOOLS/aapt" package -f -M ui-helper/AndroidManifest.xml -I "$ANDROID_JAR" -F ui-helper/unsigned.apk
+          zip -j ui-helper/unsigned.apk ui-helper/dex/classes.dex
+          "$BUILD_TOOLS/zipalign" -f 4 ui-helper/unsigned.apk ui-helper/aligned.apk
+          keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
+          "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
+          adb install --no-streaming ui-helper/test.apk
+      - name: Check V2 collections, dated documentation and isolated web lesson
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess, time, xml.etree.ElementTree as ET
+          
+          out = pathlib.Path('evidence')
+          
+          
+          class TransientSnapshotError(Exception):
+              pass
+          
+          
+          def adb(*args, timeout=20):
+              return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
+          
+          
+          def dump_once(timeout=30):
+              raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=timeout)
+              out.joinpath('latest-ui-instrumentation.txt').write_text(raw, encoding='utf-8')
+              marker = 'INSTRUMENTATION_RESULT: rwadar_ui='
+              if marker not in raw and 'No active UI root' in raw:
+                  raise TransientSnapshotError('UiAutomation has no active root during a window transition')
+              assert marker in raw, 'Fresh UI snapshot failed: ' + raw[-1200:]
+              xml = raw.split(marker, 1)[1].split('\nINSTRUMENTATION_', 1)[0].strip()
+              root = ET.fromstring(xml)
+              out.joinpath('latest-ui.xml').write_text(xml, encoding='utf-8')
+              return root
+          
+          
+          def dump(timeout=30):
+              deadline = time.monotonic() + timeout
+              while True:
+                  try:
+                      return dump_once(timeout=max(.1, deadline - time.monotonic()))
+                  except TransientSnapshotError as error:
+                      with out.joinpath('snapshot-errors.log').open('a', encoding='utf-8') as log:
+                          log.write(str(error) + '\n')
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          raise
+                      time.sleep(min(2, remaining))
+          
+          
+          def visible_text(root):
+              return '\n'.join(value for node in root.iter('node') if node.get('visible') != 'false' for value in [node.get('text', ''), node.get('content-desc', '')] if value)
+          
+          
+          def wait_ui(*texts, timeout=75):
+              deadline = time.monotonic() + timeout
+              while time.monotonic() < deadline:
+                  try:
+                      root = dump(timeout=min(30, max(.1, deadline - time.monotonic())))
+                      if all(text in visible_text(root) for text in texts):
+                          return root
+                  except (subprocess.SubprocessError, ET.ParseError, TransientSnapshotError) as error:
+                      with out.joinpath('snapshot-errors.log').open('a', encoding='utf-8') as log:
+                          log.write(str(error) + '\n')
+                  time.sleep(2)
+              raise AssertionError('Native UI did not visibly show: ' + ', '.join(texts))
+          
+          
+          def screen(name, root=None):
+              image = subprocess.run(['adb', 'exec-out', 'screencap', '-p'], check=True, capture_output=True, timeout=20).stdout
+              assert image.startswith(b'\x89PNG'), 'Screenshot must be a real PNG'
+              out.joinpath(name + '.png').write_bytes(image)
+              if root is not None:
+                  out.joinpath(name + '.xml').write_text(ET.tostring(root, encoding='unicode'), encoding='utf-8')
+          
+          
+          def find_node(root, label, starts=False):
+              candidates = []
+              for node in root.iter('node'):
+                  values = [node.get('content-desc', ''), node.get('text', '')]
+                  if node.get('visible') != 'false' and any(v.startswith(label) if starts else v == label for v in values):
+                      candidates.append(node)
+              candidates.sort(key=lambda n: n.get('clickable') != 'true')
+              for node in candidates:
+                  bounds = list(map(int, re.findall(r'-?\d+', node.get('bounds', ''))))
+                  if len(bounds) == 4 and bounds[2] > bounds[0] and bounds[3] > bounds[1]:
+                      return node, bounds
+              raise AssertionError('Accessible control not found: ' + label)
+          
+          
+          def tap_observed(root, label, starts=False):
+              node, bounds = find_node(root, label, starts)
+              adb('shell', 'input', 'tap', str((bounds[0]+bounds[2])//2), str((bounds[1]+bounds[3])//2))
+              return node
+          
+          
+          def scroll_down():
+              size = re.search(r'Physical size:\s*(\d+)x(\d+)', adb('shell', 'wm', 'size'))
+              assert size, 'Need actual device dimensions for scrolling'
+              width, height = map(int, size.groups())
+              adb('shell', 'input', 'swipe', str(width//2), str(int(height*.80)), str(width//2), str(int(height*.32)), '450')
+              time.sleep(.5)
+          
+          
+          def document_detail(prefix, title, required, forbidden=()):
+              root = wait_ui('Cerrar ' + title)
+              remaining = set(required)
+              for index in range(30):
+                  root = dump()
+                  text = visible_text(root)
+                  assert not any(item in text for item in forbidden), 'Commercial claim in documentary detail: ' + text
+                  newly = {item for item in remaining if item in text}
+                  if newly or index == 0:
+                      screen(prefix + '-%02d' % index, root)
+                  remaining -= newly
+                  if not remaining:
+                      return root
+                  scroll_down()
+              raise AssertionError('Missing visible documentary evidence: ' + ', '.join(sorted(remaining)))
+          
+          
+          def assert_card(root, title):
+              node, _ = find_node(root, title + '.', starts=True)
+              label = node.get('content-desc', '')
+              assert 'Referencia documentada' in label, label
+              assert 'CONDICIONES ACTUALES: Consultar emisor' in label, label
+              assert 'Pendiente de revisión' not in label, label
+          
+          
+          def search(root, query):
+              tap_observed(root, 'Buscar ofertas por nombre, proveedor, país o métrica')
+              adb('shell', 'input', 'text', query.replace(' ', '%s'))
+              adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
+              return wait_ui(query, '1 ficha')
+          
+          
+          def assert_v2_collections(root):
+              text = visible_text(root)
+              match = re.search(r'(\d+) principales · (\d+) secundarias · (\d+) en camino', text)
+              assert match, 'Missing explicit V2 collection counts: ' + text
+              counts = tuple(map(int, match.groups()))
+              assert counts == (24, 21, 4) and sum(counts) == 49, 'Partial or unexpected V2 catalog: ' + str(counts)
+              for control in ('Mostrar principales 24', 'Mostrar secundario 21', 'Mostrar en camino 4'):
+                  find_node(root, control)
+              assert '28 fichas' not in text and 'fixture local' not in text and 'copia sin conexión' not in text, 'Old/local/offline catalog must not pass the fresh V2 smoke'
+              return {'principales': counts[0], 'secundario': counts[1], 'en_camino': counts[2]}
+          
+          
+          def clear_search(root, count):
+              tap_observed(root, 'Limpiar búsqueda y filtros de ofertas')
+              return wait_ui(str(count) + ' fichas')
+          
+          
+          def assert_documentary_card(root, title, status):
+              node, _ = find_node(root, title + '.', starts=True)
+              label = node.get('content-desc', '')
+              assert 'REFERENCIA DOCUMENTAL: Consultar fuente' in label and status in label, label
+              assert 'Referencia documentada · 30/09/2026' in label, label
+              assert not re.search(r'\d[\d.,]*\s*(?:%|EUR|CHF|USD|€|\$)', label), 'Documentary card presents a commercial figure: ' + label
+              assert 'Pendiente de revisión' not in label and 'Disponible desde España en la fecha verificada' not in label, label
+          
+          
+          launch = adb('shell', 'am', 'start', '-W', '-n', 'com.rwadar.app/.MainActivity')
+          out.joinpath('launch.txt').write_text(launch, encoding='utf-8')
+          assert 'Status: ok' in launch, launch
+          root = wait_ui('Explora lo verificado', '26 plataformas')
+          screen('01-radar-live-catalog', root)
+          tap_observed(root, 'Ofertas')
+          root = wait_ui('Ofertas específicas', '24 fichas', '24 principales · 21 secundarias · 4 en camino')
+          collections = assert_v2_collections(root)
+          screen('02-offers', root)
+          root = search(root, 'Spiko')
+          assert_card(root, 'Spiko Letras del Tesoro Euro')
+          screen('03-filter-spiko', root)
+          tap_observed(root, 'Spiko Letras del Tesoro Euro.', starts=True)
+          root = document_detail('04-spiko-documentary', 'Spiko Letras del Tesoro Euro',
+                                 ['FICHA DOCUMENTADA', 'FR001400ODL1', 'REFERENCIAS FECHADAS',
+                                  '1,0597 EUR', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026',
+                                  'No son precios actuales', 'https://data.spiko.io/eutbl/'])
+          tap_observed(root, 'Cerrar Spiko Letras del Tesoro Euro')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          tap_observed(root, 'Limpiar búsqueda y filtros de ofertas')
+          root = wait_ui('24 fichas')
+          root = search(root, 'Boss')
+          assert_card(root, 'Boss Info')
+          screen('05-filter-boss', root)
+          tap_observed(root, 'Boss Info.', starts=True)
+          root = document_detail('06-boss-documentary', 'Boss Info',
+                                 ['FICHA DOCUMENTADA', 'BOSS', 'REFERENCIAS FECHADAS', '8,44 CHF',
+                                  'Fecha del dato: 29/08/2026', 'Consultado el 27/09/2026',
+                                  '6,70 CHF', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026',
+                                  'No son precios actuales', 'https://shares.bossinfo.com/'])
+          tap_observed(root, 'Cerrar Boss Info')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          root = clear_search(root, 24)
+          tap_observed(root, 'Mostrar secundario 21')
+          root = wait_ui('21 fichas', 'No confirman precio, liquidez ni disponibilidad actuales.')
+          assert_v2_collections(root)
+          screen('07-secondary-collection', root)
+          root = search(root, 'Miami 1')
+          assert_documentary_card(root, 'Miami 1', 'Referencia documental · liquidez no confirmada')
+          screen('08-secondary-card', root)
+          tap_observed(root, 'Miami 1.', starts=True)
+          documentary_forbidden = ['Disponible desde España en la fecha verificada', 'Ver oferta en',
+                                   'Ver mercado en', 'PRECIO DE REFERENCIA', 'RENTABILIDAD PUBLICADA',
+                                   'RENTABILIDAD AJUSTADA / PUBLICADA']
+          root = document_detail('09-secondary-documentary', 'Miami 1',
+                                 ['REFERENCIA · SECUNDARIO', 'FICHA DOCUMENTADA', 'REFERENCIAS FECHADAS',
+                                  'REFERENCIA DOCUMENTAL', 'Consultar fuente', 'No son precios actuales',
+                                  '14,88 %', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026',
+                                  'No se ha revalidado el libro de órdenes', 'Consultar fuente en Reental'],
+                                 documentary_forbidden)
+          find_node(root, 'Consultar fuente en Reental ↗')
+          tap_observed(root, 'Cerrar Miami 1')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          root = clear_search(root, 21)
+          tap_observed(root, 'Mostrar en camino 4')
+          root = wait_ui('4 fichas', 'No confirman apertura, fecha de lanzamiento ni acceso a la inversión.')
+          assert_v2_collections(root)
+          screen('10-upcoming-collection', root)
+          root = search(root, 'IOD Occasio')
+          assert_documentary_card(root, 'IOD Occasio', 'Anuncio documentado · apertura no confirmada')
+          screen('11-upcoming-card', root)
+          tap_observed(root, 'IOD Occasio.', starts=True)
+          root = document_detail('12-upcoming-documentary', 'IOD Occasio',
+                                 ['REFERENCIA · EN CAMINO', 'Anuncio documentado · apertura no confirmada',
+                                  'FICHA DOCUMENTADA', 'REFERENCIAS FECHADAS', 'En estudio',
+                                  'sin apertura comprobada', 'No son precios actuales',
+                                  'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026',
+                                  'Consultar fuente en Alius Capital'], documentary_forbidden)
+          find_node(root, 'Consultar fuente en Alius Capital ↗')
+          tap_observed(root, 'Cerrar IOD Occasio')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          root = clear_search(root, 4)
+          tap_observed(root, 'Mostrar principales 24')
+          root = wait_ui('24 fichas')
+          assert_v2_collections(root)
+          tap_observed(root, 'Radar')
+          root = wait_ui('Explora lo verificado', '26 plataformas')
+          tap_observed(root, 'Abrir explicación animada sobre RWAdar')
+          root = wait_ui('Cerrar el explicador', 'Tokenizar es', timeout=180)
+          assert any('WebView' in n.get('class', '') and n.get('visible') != 'false' for n in root.iter('node')), 'Expected live embedded lesson, not native offline fallback'
+          forbidden = ['Activos y ofertas documentados', 'El radar en tu Android', '28 referencias', '49 referencias',
+                       '24 principales', '21 secundarias', '4 en camino',
+                       'Buscar plataforma', 'Mi cuenta', 'Patrocinar RWAdar', 'Fuera del radar',
+                       'Descargar Android', 'Todos los activos', 'Iniciar sesión']
+          for index in range(4):
+              root = dump()
+              text = visible_text(root)
+              assert not any(item in text for item in forbidden), 'Other website section visible inside the explainer: ' + text
+              screen('13-explainer-only-lesson-%02d' % index, root)
+              if index < 3:
+                  scroll_down()
+          root = wait_ui('Cerrar el explicador')
+          tap_observed(root, 'Cerrar el explicador')
+          root = wait_ui('Explora lo verificado', '26 plataformas')
+          screen('14-return-to-radar', root)
+          assert adb('shell', 'pidof', 'com.rwadar.app').strip(), 'App process must remain alive'
+          logs = adb('logcat', '-d', '-v', 'threadtime', 'AndroidRuntime:E', 'ReactNativeJS:E', '*:S')
+          out.joinpath('app-errors.log').write_text(logs, encoding='utf-8')
+          assert 'FATAL EXCEPTION' not in logs, 'Android crash recorded'
+          assert not re.search(r'ReactNativeJS.*(?:Error:|TypeError|ReferenceError|Invariant Violation)', logs), 'JavaScript error recorded'
+          result = {'package':'com.rwadar.app', 'version':'1.1.2', 'versionCode':10,
+                    'apkSha256':os.environ['APK_SHA256'], 'apkBytes':int(os.environ['APK_BYTES']),
+                    'certificateSha256':os.environ['CERT_SHA256'], 'workflowSha':os.environ['WORKFLOW_SHA'],
+                    'headSha':os.environ['HEAD_SHA'], 'runId':os.environ['RUN_ID'],
+                    'androidApi':35, 'installation':True, 'launch':True,
+                    'freshInstallLiveCatalogPlatforms':26, 'offers':49,
+                    'catalogSchemaVersion':2, 'collections':collections,
+                    'noV1CatalogFallback':True, 'documentarySecondary':True, 'documentaryUpcoming':True,
+                    'searchAndDetail':True, 'documentarySpiko':True, 'documentaryBoss':True,
+                    'noGenericPendingMainFigure':True, 'explainerWebViewOnlyLesson':True,
+                    'returnFromExplainer':True, 'physicalDevice':False}
+          out.joinpath('result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
+          print(json.dumps(result))
+          PY
+      - name: Capture final emulator state and stop the disposable device
+        if: always()
+        shell: bash
+        run: |
+          if adb get-state >/dev/null 2>&1; then
+            adb exec-out screencap -p > evidence/final-state.png || true
+            adb logcat -d -v threadtime AndroidRuntime:E ReactNativeJS:E '*:S' > evidence/final-errors.log || true
+            adb shell dumpsys webviewupdate > evidence/webview-provider.txt || true
+            adb logcat -d -v threadtime chromium:E cr_WebViewFactory:E '*:S' > evidence/webview-errors.log || true
+            adb emu kill || true
+          fi
+      - name: Retain only test evidence, not the APK or private source
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rwadar-android-apk10-smoke
+          path: evidence/
+          retention-days: 7
+          if-no-files-found: error
