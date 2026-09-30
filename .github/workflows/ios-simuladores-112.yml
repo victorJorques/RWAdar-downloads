@@ -1,0 +1,364 @@
+name: RWAdar iOS simulator startup checks
+run-name: RWAdar iOS simulator112 3ca1864e6819b588612576d2056842e87aefed61c8be2e13ca40c4095f2dbf47
+on:
+  workflow_dispatch: null
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-ios112-3ca1864e-simulators
+  cancel-in-progress: false
+jobs:
+  ios:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+    steps:
+      - name: Download exact simulator artifact
+        id: artifact_download
+        env:
+          SIMULATOR_ARTIFACT_URL: ${{ secrets.RWADAR_IOS_SIM_14E31C82_3CA1864E }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          """Generic simulator artifact check; private URL lives only in this step's env."""
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import plistlib
+          import ssl
+          import subprocess
+          import sys
+          import tarfile
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          SHA = "3ca1864e6819b588612576d2056842e87aefed61c8be2e13ca40c4095f2dbf47"
+          BYTES = 20259718
+          BUILD = "14e31c82-70a5-4962-bdff-9dd3f793cf56"
+          HOSTS = {"expo.dev", "api.expo.dev", "wf-artifacts.eascdn.net", "storage.googleapis.com"}
+          ROOT = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("rwadar-ios-" + os.environ["GITHUB_RUN_ID"])
+          EVIDENCE = pathlib.Path.cwd() / "evidence"
+          STAGE = "initialization"
+
+
+          def ensure(value):
+              if not value:
+                  raise RuntimeError("Guard failed")
+
+
+          def cmd(args, timeout=60):
+              result = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+              ensure(result.returncode == 0)
+              return result.stdout
+
+
+          def save(value):
+              EVIDENCE.mkdir(exist_ok=True)
+              (EVIDENCE / "report.json").write_text(json.dumps(value, indent=2) + "\n")
+
+
+          class SafeRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, request, fp, code, message, headers, newurl):
+                  verify_url(newurl)
+                  return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+          def verify_url(value):
+              url = urllib.parse.urlsplit(value)
+              ensure(url.scheme == "https" and url.hostname in HOSTS and not url.username and not url.password and url.port in (None, 443))
+
+
+          def main():
+              global STAGE
+              url = os.environ.pop("SIMULATOR_ARTIFACT_URL", "")
+              verify_url(url)
+              STAGE = "runner-version"
+              ensure(cmd(["uname", "-m"]).decode().strip() == "arm64")
+              xcode = cmd(["xcodebuild", "-version"]).decode().strip()
+              ensure(xcode == "Xcode 26.6\nBuild version 17F113")
+              ensure(cmd(["xcrun", "--sdk", "iphonesimulator", "--show-sdk-version"]).decode().strip() == "26.5")
+              STAGE = "private-download"
+              ROOT.mkdir(mode=0o700, parents=False, exist_ok=False)
+              opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ssl.create_default_context()), SafeRedirect())
+              digest, count = hashlib.sha256(), 0
+              archive_path = ROOT / "application.tar.gz"
+              with opener.open(url, timeout=90) as response, archive_path.open("xb") as output:
+                  ensure(response.status == 200)
+                  verify_url(response.url)
+                  while True:
+                      block = response.read(1024 * 1024)
+                      if not block:
+                          break
+                      count += len(block)
+                      ensure(count <= BYTES)
+                      digest.update(block)
+                      output.write(block)
+              del url
+              ensure(count == BYTES and digest.hexdigest() == SHA)
+              STAGE = "archive-paths"
+              extract = ROOT / "extracted"
+              extract.mkdir(mode=0o700)
+              with tarfile.open(archive_path, "r:gz") as archive:
+                  members = archive.getmembers()
+                  ensure(len(members) == 206)
+                  names, expanded = set(), 0
+                  for member in members:
+                      p = pathlib.PurePosixPath(member.name)
+                      ensure(not p.is_absolute() and ".." not in p.parts and not any(x in member.name for x in ("\\", ":", "\x00")))
+                      ensure(member.name not in names and (member.isfile() or member.isdir()))
+                      names.add(member.name)
+                      expanded += member.size
+                      ensure(expanded <= 128 * 1024 * 1024)
+                  roots = {pathlib.PurePosixPath(x).parts[0] for x in names}
+                  ensure(len(roots) == 1 and next(iter(roots)).endswith(".app") and expanded == 70287669)
+                  app = extract / next(iter(roots))
+                  for member in members:
+                      target = extract.joinpath(*pathlib.PurePosixPath(member.name).parts)
+                      ensure(target.resolve().is_relative_to(extract.resolve()))
+                      if member.isdir():
+                          target.mkdir(parents=True, exist_ok=True)
+                      else:
+                          target.parent.mkdir(parents=True, exist_ok=True)
+                          with target.open("xb") as output:
+                              content = archive.extractfile(member)
+                              while True:
+                                  block = content.read(1024 * 1024)
+                                  if not block:
+                                      break
+                                  output.write(block)
+                          target.chmod(member.mode & 0o777)
+              STAGE = "native-security"
+              info = plistlib.loads((app / "Info.plist").read_bytes())
+              ensure(info.get("CFBundleIdentifier") == "com.rwadar.app" and info.get("CFBundleShortVersionString") == "1.1.2" and str(info.get("CFBundleVersion")) == "1")
+              ensure(info.get("CFBundleSupportedPlatforms") == ["iPhoneSimulator"] and set(info.get("UIDeviceFamily", [])) == {1, 2})
+              ats = info.get("NSAppTransportSecurity", {})
+              ensure(all(ats.get(key) is False for key in ("NSAllowsArbitraryLoads", "NSAllowsArbitraryLoadsInWebContent", "NSAllowsArbitraryLoadsForMedia", "NSAllowsLocalNetworking")) and not ats.get("NSExceptionDomains"))
+              ensure("NSFaceIDUsageDescription" not in info and "NSUserTrackingUsageDescription" not in info and not info.get("UIBackgroundModes"))
+              expo = list(app.rglob("Expo.plist"))
+              ensure(len(expo) == 1 and plistlib.loads(expo[0].read_bytes()).get("EXUpdatesEnabled") is False)
+              exe = app / info["CFBundleExecutable"]
+              ensure(exe.resolve().is_relative_to(app.resolve()))
+              ensure("arm64" in cmd(["lipo", "-archs", str(exe)]).decode().split())
+              # codesign material remains captured in memory; no certificate/key creation.
+              signature = subprocess.run(["codesign", "-d", "--entitlements", ":-", str(app)], capture_output=True, timeout=60)
+              ensure(signature.returncode == 0)
+              raw = signature.stdout
+              begin = raw.find(b"<?xml")
+              ensure(begin >= 0 or raw.startswith(b"bplist00"))
+              entitlements = plistlib.loads(raw[begin:] if begin >= 0 else raw)
+              ensure(isinstance(entitlements, dict))
+              ensure(not any(key in entitlements for key in ("aps-environment", "com.apple.developer.team-identifier", "application-identifier", "keychain-access-groups", "get-task-allow")))
+              details = subprocess.run(["codesign", "-d", "--verbose=4", str(app)], capture_output=True, timeout=60)
+              ensure(details.returncode == 0 and b"Signature=adhoc" in details.stderr and b"TeamIdentifier=not set" in details.stderr and b"Authority=" not in details.stderr)
+              cmd(["codesign", "--verify", "--deep", "--strict", str(app)])
+              privacy = [plistlib.loads(x.read_bytes()) for x in app.rglob("*.xcprivacy")]
+              ensure(len(privacy) == 13 and all(not x.get("NSPrivacyTracking") and not x.get("NSPrivacyTrackingDomains") and not x.get("NSPrivacyCollectedDataTypes") for x in privacy))
+              ensure(not any(x.suffix in (".p12", ".pem", ".p8", ".mobileprovision") or x.name in (".env", "credentials.json") for x in app.rglob("*") if x.is_file()))
+              result = {
+                  "schema": 1, "buildId": BUILD, "sha256": SHA, "bytes": BYTES,
+                  "runId": os.environ["GITHUB_RUN_ID"], "headSha": os.environ["GITHUB_SHA"],
+                  "workflowSha": os.environ["WORKFLOW_SHA"], "runnerArm64": True,
+                  "xcode": "26.6/17F113", "simulatorSdk": "26.5", "macOS": cmd(["sw_vers", "-productVersion"]).decode().strip(),
+                  "archivePathsSafe": True, "nativeIdentityMatched": True,
+                  "atsStrict": True, "faceIDDeclared": False, "trackingPermissionDeclared": False,
+                  "otaEnabled": False, "entitlementsDecodedByCodesign": True,
+                  "entitlementKeysCount": len(entitlements), "apnsPresent": False,
+                  "appleTeamOrDistributionSignature": False, "adHocSignatureVerified": True,
+                  "privacyManifestCount": 13, "trackingDeclared": False, "collectedDataTypesDeclared": 0,
+                  "simulatorResults": [], "appTrafficCaptured": False, "physicalDeviceTested": False,
+                  "interactiveUiTested": False, "accountsUsed": False, "additionalBuildRequested": False,
+                  "pass": False, "stage": "native-checks-complete", "retentionDays": 1,
+                  "maxEvidenceBytes": 10 * 1024 * 1024,
+              }
+              save(result)
+              (ROOT / "context.json").write_text(json.dumps({"app": str(app)}))
+              print("Artifact download and native checks completed; no private URL or binary published.")
+
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except Exception:
+                  save({"schema": 1, "buildId": BUILD, "sha256": SHA, "pass": False, "stage": STAGE, "rawErrorSaved": False})
+                  print("Simulator artifact check stopped at reviewed stage: " + STAGE)
+                  sys.exit(1)
+          PY
+      - name: Start disposable iPhone and iPad
+        id: simulator_startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          """Start two disposable editorial simulators; no UI taps or personal accounts."""
+          import datetime
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import re
+          import subprocess
+          import sys
+          import time
+
+          ROOT = pathlib.Path(os.environ["RUNNER_TEMP"]) / ("rwadar-ios-" + os.environ["GITHUB_RUN_ID"])
+          EVIDENCE = pathlib.Path.cwd() / "evidence"
+          REPORT = EVIDENCE / "report.json"
+          STAGE = "simulator-preflight"
+          CREATED = []
+          LOGS = []
+
+
+          def ensure(value):
+              if not value:
+                  raise RuntimeError("Guard failed")
+
+
+          def run(args, timeout=60):
+              result = subprocess.run(args, capture_output=True, timeout=timeout, check=False)
+              ensure(result.returncode == 0)
+              return result.stdout
+
+
+          def alive(pid):
+              try:
+                  os.kill(pid, 0)
+                  return True
+              except OSError:
+                  return False
+
+
+          def main():
+              global STAGE
+              report = json.loads(REPORT.read_text())
+              app = pathlib.Path(json.loads((ROOT / "context.json").read_text())["app"])
+              ensure(app.resolve().is_relative_to((ROOT / "extracted").resolve()))
+              for subcommand in ("create", "boot", "bootstatus", "install", "launch", "io", "spawn", "shutdown", "delete"):
+                  run(["xcrun", "simctl", "help", subcommand])
+              runtimes = json.loads(run(["xcrun", "simctl", "list", "runtimes", "--json"]))["runtimes"]
+              selected = [x for x in runtimes if x.get("isAvailable") and x.get("version") == "26.5" and x["identifier"].startswith("com.apple.CoreSimulator.SimRuntime.iOS-")]
+              ensure(len(selected) == 1)
+              runtime = selected[0]["identifier"]
+              types = json.loads(run(["xcrun", "simctl", "list", "devicetypes", "--json"]))["devicetypes"]
+              devices = [("iphone", "iPhone 17"), ("ipad", "iPad Pro 13-inch (M5)")]
+              report["runtime"] = "iOS 26.5"
+              for label, name in devices:
+                  STAGE = label + "-create"
+                  match = [x for x in types if x.get("name") == name]
+                  ensure(len(match) == 1)
+                  udid = run(["xcrun", "simctl", "create", "RWAdar-editorial-" + label, match[0]["identifier"], runtime]).decode().strip()
+                  ensure(re.fullmatch(r"[A-Fa-f0-9-]{36}", udid))
+                  CREATED.append(udid)
+                  run(["xcrun", "simctl", "boot", udid])
+                  run(["xcrun", "simctl", "bootstatus", udid, "-b"], timeout=240)
+                  STAGE = label + "-launch"
+                  run(["xcrun", "simctl", "install", udid, str(app)], timeout=90)
+                  began = datetime.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S")
+                  launched = run(["xcrun", "simctl", "launch", "--terminate-running-process", udid, "com.rwadar.app"]).decode().strip()
+                  match_pid = re.fullmatch(r"com\.rwadar\.app:\s*(\d+)", launched)
+                  ensure(match_pid is not None)
+                  pid = int(match_pid.group(1))
+                  STAGE = label + "-survival-captures"
+                  time.sleep(12)
+                  ensure(alive(pid))
+                  first = EVIDENCE / (label + "-inicio.png")
+                  run(["xcrun", "simctl", "io", udid, "screenshot", "--type=png", str(first)])
+                  time.sleep(35)
+                  survived = alive(pid)
+                  ensure(survived)
+                  final = EVIDENCE / (label + "-catalogo.png")
+                  run(["xcrun", "simctl", "io", udid, "screenshot", "--type=png", str(final)])
+                  STAGE = label + "-logs"
+                  # Capture only this process and interval, classify in memory, discard raw content.
+                  predicate = "processIdentifier == " + str(pid)
+                  raw = run(["xcrun", "simctl", "spawn", udid, "log", "show", "--style", "json", "--start", began, "--predicate", predicate], timeout=90)
+                  entries = json.loads(raw)
+                  ensure(isinstance(entries, list))
+                  counts = {"jsFatal": 0, "nativeException": 0, "tlsFailure": 0}
+                  for item in entries:
+                      message = str(item.get("eventMessage", "")).lower()
+                      counts["jsFatal"] += int(any(x in message for x in ("fatal javascript", "unhandled js exception", "rctfatal", "uncaught javascript")))
+                      counts["nativeException"] += int(any(x in message for x in ("terminating app due to uncaught exception", "fatal exception")))
+                      counts["tlsFailure"] += int(any(x in message for x in ("ssl error", "ats failed", "tls handshake failed", "app transport security has blocked")))
+                  LOGS.append({"device": label, "processOnly": True, "intervalOnly": True, "matchedEntries": len(entries), "categories": counts, "rawMessagesSaved": False})
+                  ensure(not any(counts.values()))
+                  report["simulatorResults"].append({"device": name, "launched": True, "survivedSeconds": 47, "screenshots": [first.name, final.name], "nativeLogsClassified": True, "recognizedFatalOrTlsMessages": 0, "interactiveUiTested": False})
+                  run(["xcrun", "simctl", "terminate", udid, "com.rwadar.app"])
+                  run(["xcrun", "simctl", "shutdown", udid])
+                  run(["xcrun", "simctl", "delete", udid])
+                  CREATED.remove(udid)
+                  REPORT.write_text(json.dumps(report, indent=2) + "\n")
+              report["pass"], report["stage"] = True, "two-simulator-startup-complete"
+              REPORT.write_text(json.dumps(report, indent=2) + "\n")
+              print("iPhone and iPad startup checks complete; screenshots require human review.")
+
+
+          if __name__ == "__main__":
+              try:
+                  main()
+              except Exception:
+                  report = json.loads(REPORT.read_text()) if REPORT.exists() else {"schema": 1}
+                  report.update({"pass": False, "stage": STAGE, "rawErrorSaved": False})
+                  REPORT.write_text(json.dumps(report, indent=2) + "\n")
+                  print("Simulator startup stopped at reviewed stage: " + STAGE)
+                  sys.exitCode = 1
+              finally:
+                  for udid in CREATED:
+                      # Only exact disposable IDs created by this execution are touched.
+                      subprocess.run(["xcrun", "simctl", "shutdown", udid], capture_output=True, timeout=30)
+                      subprocess.run(["xcrun", "simctl", "delete", udid], capture_output=True, timeout=30)
+                  (EVIDENCE / "logs-redacted.json").write_text(json.dumps({"schema": 1, "processResults": LOGS, "rawLogsSaved": False}, indent=2) + "\n")
+                  if getattr(sys, "exitCode", 0):
+                      sys.exit(1)
+          PY
+      - name: Verify evidence whitelist
+        id: evidence_guard
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          """Strict whitelist: no binary, source, app container, secret or raw logs."""
+          import hashlib
+          import json
+          import pathlib
+
+          ROOT = pathlib.Path.cwd() / "evidence"
+          FILES = {"iphone-inicio.png", "iphone-catalogo.png", "ipad-inicio.png", "ipad-catalogo.png", "report.json", "logs-redacted.json"}
+          assert ROOT.is_dir() and not ROOT.is_symlink()
+          paths = list(ROOT.iterdir())
+          assert all(x.name in FILES and x.is_file() and not x.is_symlink() for x in paths)
+          assert sum(x.stat().st_size for x in paths) < 10 * 1024 * 1024 - 65536
+          report = json.loads((ROOT / "report.json").read_text())
+          assert report.get("schema") == 1
+          if report.get("pass"):
+              assert {x.name for x in paths} == FILES
+              assert len(report.get("simulatorResults", [])) == 2
+          report["evidenceFiles"] = [{"name": x.name, "bytes": x.stat().st_size, "sha256": hashlib.sha256(x.read_bytes()).hexdigest()} for x in sorted(paths) if x.name != "report.json"]
+          report["maxEvidenceBytes"], report["retentionDays"] = 10 * 1024 * 1024, 1
+          (ROOT / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+          assert sum(x.stat().st_size for x in ROOT.iterdir()) < 10 * 1024 * 1024 - 65536
+          print("Evidence whitelist and size bound verified.")
+          PY
+      - name: Upload only reviewed evidence
+        if: always() && steps.evidence_guard.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: rwadar-ios112-3ca1864e-simulator-evidence
+          path: |-
+            evidence/iphone-inicio.png
+            evidence/iphone-catalogo.png
+            evidence/ipad-inicio.png
+            evidence/ipad-catalogo.png
+            evidence/report.json
+            evidence/logs-redacted.json
+          retention-days: 1
+          compression-level: 9
+          include-hidden-files: false
+          overwrite: false
+          if-no-files-found: error
