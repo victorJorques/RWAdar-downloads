@@ -280,11 +280,13 @@ jobs:
               raise AssertionError('Missing visible documentary evidence: ' + ', '.join(sorted(remaining)))
           
           
-          def assert_card(root, title):
+          def assert_card(root, title, expected, forbidden=()):
               node, _ = find_node(root, title + '.', starts=True)
               label = node.get('content-desc', '')
               assert 'Referencia documentada' in label, label
-              assert 'CONDICIONES ACTUALES: Consultar emisor' in label, label
+              assert 'Referencia documentada · 30/09/2026' in label, label
+              assert all(value in label for value in expected), label
+              assert not any(value in label for value in forbidden), label
               assert 'Pendiente de revisión' not in label, label
           
           
@@ -331,7 +333,10 @@ jobs:
           collections = assert_v2_collections(root)
           screen('02-offers', root)
           root = search(root, 'Spiko')
-          assert_card(root, 'Spiko Letras del Tesoro Euro')
+          assert_card(root, 'Spiko Letras del Tesoro Euro',
+                      ['RENTABILIDAD PUBLICADA: 2,17 %',
+                       'Rendimiento anualizado a 30 días observado el 30/09/2026; variable y no garantizado.'],
+                      ['RENTABILIDAD PUBLICADA: 2,18 %'])
           screen('03-filter-spiko', root)
           tap_observed(root, 'Spiko Letras del Tesoro Euro.', starts=True)
           root = document_detail('04-spiko-documentary', 'Spiko Letras del Tesoro Euro',
@@ -343,7 +348,8 @@ jobs:
           tap_observed(root, 'Limpiar búsqueda y filtros de ofertas')
           root = wait_ui('24 fichas')
           root = search(root, 'Boss')
-          assert_card(root, 'Boss Info')
+          assert_card(root, 'Boss Info', ['PRECIO DE REFERENCIA: Consultar fuente'],
+                      ['PRECIO DE REFERENCIA: 8,44', 'PRECIO DE REFERENCIA: 6,70', 'PRECIO DE REFERENCIA: 8,50'])
           screen('05-filter-boss', root)
           tap_observed(root, 'Boss Info.', starts=True)
           root = document_detail('06-boss-documentary', 'Boss Info',
