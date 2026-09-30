@@ -263,19 +263,25 @@ jobs:
               time.sleep(.5)
           
           
-          def document_detail(prefix, title, required, forbidden=()):
+          def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to_end=False):
               root = wait_ui('Cerrar ' + title)
               remaining = set(required)
-              for index in range(30):
+              previous_text = None
+              for index in range(40):
                   root = dump()
                   text = visible_text(root)
+                  if inspect:
+                      inspect(root)
                   assert not any(item in text for item in forbidden), 'Commercial claim in documentary detail: ' + text
                   newly = {item for item in remaining if item in text}
                   if newly or index == 0:
                       screen(prefix + '-%02d' % index, root)
                   remaining -= newly
-                  if not remaining:
+                  if not remaining and (not scan_to_end or text == previous_text):
+                      if scan_to_end:
+                          screen(prefix + '-complete', root)
                       return root
+                  previous_text = text
                   scroll_down()
               raise AssertionError('Missing visible documentary evidence: ' + ', '.join(sorted(remaining)))
           
@@ -323,6 +329,17 @@ jobs:
               assert 'Pendiente de revisión' not in label and 'Disponible desde España en la fecha verificada' not in label, label
           
           
+          def assert_no_clickable_urls(root, forbidden):
+              def check(node, clickable_ancestor=False):
+                  clickable = clickable_ancestor or node.get('clickable') == 'true'
+                  label = node.get('text', '') + ' ' + node.get('content-desc', '')
+                  if clickable and node.get('visible') != 'false':
+                      assert not any(url in label for url in forbidden), 'Historical or wrong destination remains clickable: ' + label
+                  for child in node:
+                      check(child, clickable)
+              check(root)
+          
+          
           launch = adb('shell', 'am', 'start', '-W', '-n', 'com.rwadar.app/.MainActivity')
           out.joinpath('launch.txt').write_text(launch, encoding='utf-8')
           assert 'Status: ok' in launch, launch
@@ -358,6 +375,21 @@ jobs:
                                   '6,70 CHF', 'Fecha del dato: 28/09/2026', 'Consultado el 30/09/2026',
                                   'No son precios actuales', 'https://shares.bossinfo.com/'])
           tap_observed(root, 'Cerrar Boss Info')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          root = clear_search(root, 24)
+          root = search(root, 'GreenPoint')
+          assert_card(root, 'Fotovoltaica GreenPoint', ['CONDICIONES ACTUALES: Consultar emisor'])
+          screen('06b-greenpoint-card', root)
+          tap_observed(root, 'Fotovoltaica GreenPoint.', starts=True)
+          root = document_detail('06c-greenpoint-documentary', 'Fotovoltaica GreenPoint',
+                                 ['FICHA DOCUMENTADA', 'AT0000A38J32',
+                                  'https://app.brickwise.at/desktopWeb/asset/AT0000A38J32/details',
+                                  'https://app.brickwise.at/desktopWeb/marketplace',
+                                  'REFERENCIAS FECHADAS', 'Consultado el 27/09/2026',
+                                  'Consultar fuente en Brickwise', 'FUENTES CONSULTADAS'],
+                                 inspect=lambda r: assert_no_clickable_urls(r, ['/desktopWeb/asset/']),
+                                 scan_to_end=True)
+          tap_observed(root, 'Cerrar Fotovoltaica GreenPoint')
           root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
           root = clear_search(root, 24)
           tap_observed(root, 'Mostrar secundario 21')
@@ -399,6 +431,21 @@ jobs:
           tap_observed(root, 'Cerrar IOD Occasio')
           root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
           root = clear_search(root, 4)
+          root = search(root, 'Hausera')
+          assert_documentary_card(root, 'Hausera · próximas ofertas', 'Anuncio documentado · apertura no confirmada')
+          screen('12b-hausera-card', root)
+          tap_observed(root, 'Hausera · próximas ofertas.', starts=True)
+          root = document_detail('12c-hausera-documentary', 'Hausera · próximas ofertas',
+                                 ['REFERENCIA · EN CAMINO', 'Anuncio documentado · apertura no confirmada',
+                                  'REFERENCIAS FECHADAS', 'Nada abierto', 'Fecha del dato: 28/09/2026',
+                                  'Consultado el 30/09/2026', 'https://hausera.io/',
+                                  'Consultar fuente en Hausera', 'FUENTES CONSULTADAS'],
+                                 documentary_forbidden,
+                                 inspect=lambda r: assert_no_clickable_urls(r, ['hausera.com']),
+                                 scan_to_end=True)
+          tap_observed(root, 'Cerrar Hausera · próximas ofertas')
+          root = wait_ui('Ofertas específicas', 'Limpiar búsqueda y filtros de ofertas')
+          root = clear_search(root, 4)
           tap_observed(root, 'Mostrar principales 24')
           root = wait_ui('24 fichas')
           assert_v2_collections(root)
@@ -436,6 +483,7 @@ jobs:
                     'catalogSchemaVersion':2, 'collections':collections,
                     'noV1CatalogFallback':True, 'documentarySecondary':True, 'documentaryUpcoming':True,
                     'searchAndDetail':True, 'documentarySpiko':True, 'documentaryBoss':True,
+                    'brickwiseGreenPointLinks':True, 'historicalLocatorNotClickable':True, 'hauseraIoLinks':True,
                     'noGenericPendingMainFigure':True, 'explainerWebViewOnlyLesson':True,
                     'returnFromExplainer':True, 'physicalDevice':False}
           out.joinpath('result.json').write_text(json.dumps(result, indent=2), encoding='utf-8')
