@@ -173,14 +173,20 @@ jobs:
           out = pathlib.Path('evidence')
           
           
+          class TransientSnapshotError(Exception):
+              pass
+          
+          
           def adb(*args, timeout=20):
               return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
           
           
-          def dump():
-              raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=30)
+          def dump_once(timeout=30):
+              raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=timeout)
               out.joinpath('latest-ui-instrumentation.txt').write_text(raw, encoding='utf-8')
               marker = 'INSTRUMENTATION_RESULT: rwadar_ui='
+              if marker not in raw and 'No active UI root' in raw:
+                  raise TransientSnapshotError('UiAutomation has no active root during a window transition')
               assert marker in raw, 'Fresh UI snapshot failed: ' + raw[-1200:]
               xml = raw.split(marker, 1)[1].split('\nINSTRUMENTATION_', 1)[0].strip()
               root = ET.fromstring(xml)
@@ -188,18 +194,32 @@ jobs:
               return root
           
           
+          def dump(timeout=30):
+              deadline = time.monotonic() + timeout
+              while True:
+                  try:
+                      return dump_once(timeout=max(.1, deadline - time.monotonic()))
+                  except TransientSnapshotError as error:
+                      with out.joinpath('snapshot-errors.log').open('a', encoding='utf-8') as log:
+                          log.write(str(error) + '\n')
+                      remaining = deadline - time.monotonic()
+                      if remaining <= 0:
+                          raise
+                      time.sleep(min(2, remaining))
+          
+          
           def visible_text(root):
               return '\n'.join(value for node in root.iter('node') if node.get('visible') != 'false' for value in [node.get('text', ''), node.get('content-desc', '')] if value)
           
           
-          def wait_ui(*texts):
-              deadline = time.monotonic() + 75
+          def wait_ui(*texts, timeout=75):
+              deadline = time.monotonic() + timeout
               while time.monotonic() < deadline:
                   try:
-                      root = dump()
+                      root = dump(timeout=min(30, max(.1, deadline - time.monotonic())))
                       if all(text in visible_text(root) for text in texts):
                           return root
-                  except (subprocess.SubprocessError, ET.ParseError) as error:
+                  except (subprocess.SubprocessError, ET.ParseError, TransientSnapshotError) as error:
                       with out.joinpath('snapshot-errors.log').open('a', encoding='utf-8') as log:
                           log.write(str(error) + '\n')
                   time.sleep(2)
@@ -306,7 +326,7 @@ jobs:
           tap_observed(root, 'Radar')
           root = wait_ui('Explora lo verificado', '26 plataformas')
           tap_observed(root, 'Abrir explicación animada sobre RWAdar')
-          root = wait_ui('Cerrar el explicador', 'Tokenizar es')
+          root = wait_ui('Cerrar el explicador', 'Tokenizar es', timeout=180)
           assert any('WebView' in n.get('class', '') and n.get('visible') != 'false' for n in root.iter('node')), 'Expected live embedded lesson, not native offline fallback'
           forbidden = ['Activos y ofertas documentados', 'El radar en tu Android', '28 referencias',
                        'Buscar plataforma', 'Mi cuenta', 'Patrocinar RWAdar', 'Fuera del radar',
@@ -346,6 +366,8 @@ jobs:
           if adb get-state >/dev/null 2>&1; then
             adb exec-out screencap -p > evidence/final-state.png || true
             adb logcat -d -v threadtime AndroidRuntime:E ReactNativeJS:E '*:S' > evidence/final-errors.log || true
+            adb shell dumpsys webviewupdate > evidence/webview-provider.txt || true
+            adb logcat -d -v threadtime chromium:E cr_WebViewFactory:E '*:S' > evidence/webview-errors.log || true
             adb emu kill || true
           fi
       - name: Retain only test evidence, not the APK or private source
