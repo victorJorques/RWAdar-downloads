@@ -1,0 +1,157 @@
+name: Public vendor UUID v5 native check
+run-name: Public vendor UUID v5 57.0.19 patch 636e26f83a13e22f run ${{ github.run_number }}
+'on':
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  vendor-uuid:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-26
+    timeout-minutes: 10
+    env:
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1:abort_on_error=1
+    steps:
+      - name: Verify public npm vendor and generate independent reference vectors
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          python3 - <<'PY'
+          """Public npm vendor only. This file will be embedded, without checkout, in CI."""
+          from pathlib import Path
+          import base64
+          import hashlib
+          import io
+          import json
+          import random
+          import tarfile
+          import urllib.request
+          import uuid
+
+          URL = "https://registry.npmjs.org/expo-modules-core/-/expo-modules-core-57.0.19.tgz"
+          SRI = "sha512-eAJwa5u30r4BTT8cFAcrY3809qG1cPszmEci7//+RjWGA1OMXtwirhVY1H+YtCJPyVGs9MuwrIjqQDMReguG2g=="
+          ORIGINAL_SHA = "ecde271563786e5a5fe96a810cf471b8b1c683ee77f800734b29d26a9ce3da73"
+          PATCHED_SHA = "636e26f83a13e22fc6ea80856774b92b760ebe1a5a19a05aaafe7ce67cd76e47"
+          OLD = b"""  // Create a tuple for the final UUID
+            var uuidTuple = namespace.uuid
+
+            withUnsafeMutablePointer(to: &uuidTuple) { pointer in
+              let bound = pointer.withMemoryRebound(to: UInt8.self, capacity: 16) { $0 }
+              digest.enumerated().forEach { (bound + $0.offset).pointee = $0.element }
+            }
+          """
+          NEW = b"""  // SHA1 has 20 bytes; a UUID uses only its first 16 bytes.
+            let uuidTuple: uuid_t = (
+              digest[0], digest[1], digest[2], digest[3],
+              digest[4], digest[5], digest[6], digest[7],
+              digest[8], digest[9], digest[10], digest[11],
+              digest[12], digest[13], digest[14], digest[15]
+            )
+          """
+          SWIFT_MAIN = r'''import Foundation
+
+          struct TestVector: Decodable {
+            let namespace: String
+            let name: String
+            let expected: String
+          }
+
+          func fail(_ message: String) -> Never {
+            FileHandle.standardError.write(Data((message + "\n").utf8))
+            exit(1)
+          }
+
+          guard CommandLine.arguments.count == 2 else { fail("vector path required") }
+          let vectors = try JSONDecoder().decode([TestVector].self, from: Data(contentsOf: URL(fileURLWithPath: CommandLine.arguments[1])))
+          guard vectors.count >= 120 else { fail("incomplete vector set") }
+          guard MemoryLayout<uuid_t>.size == 16 else { fail("UUID ABI must contain 16 bytes") }
+          guard vectors.first?.expected == "2ed6657d-e927-568b-95e1-2665a8aea6a2" else { fail("RFC9562 vector missing") }
+          var executions = 0
+          for vector in vectors {
+            guard let namespace = UUID(uuidString: vector.namespace) else { fail("namespace invalid") }
+            for _ in 0..<16 {
+              let actual = uuidv5(name: vector.name, namespace: namespace).uuidString.lowercased()
+              guard actual == vector.expected else { fail("UUID mismatch at public vector index \(executions / 16)") }
+              executions += 1
+            }
+          }
+          print("{\"nativeUuidV5Passed\":true,\"vectors\":\(vectors.count),\"executions\":\(executions),\"uuidBytes\":16,\"appTested\":false}")
+          '''
+
+
+          def source(archive_bytes):
+              actual_sri = "sha512-" + base64.b64encode(hashlib.sha512(archive_bytes).digest()).decode("ascii")
+              if actual_sri != SRI:
+                  raise ValueError("public npm SRI mismatch")
+              with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as archive:
+                  info = archive.getmember("package/ios/Uuidv5/Uuidv5.swift")
+                  if not info.isfile() or info.size != 1023:
+                      raise ValueError("vendor source entry mismatch")
+                  with archive.extractfile(info) as f:
+                      original = f.read(1024)
+              if hashlib.sha256(original).hexdigest() != ORIGINAL_SHA or original.count(OLD) != 1:
+                  raise ValueError("vendor source digest mismatch")
+              patched = original.replace(OLD, NEW, 1)
+              if len(patched) != 1024 or hashlib.sha256(patched).hexdigest() != PATCHED_SHA:
+                  raise ValueError("public patch digest mismatch")
+              return original, patched
+
+
+          def vectors():
+              rfc = {"namespace":str(uuid.NAMESPACE_DNS), "name":"www.example.com",
+                     "expected":"2ed6657d-e927-568b-95e1-2665a8aea6a2"}
+              if str(uuid.uuid5(uuid.NAMESPACE_DNS,rfc["name"])) != rfc["expected"]:
+                  raise ValueError("independent Python UUID reference mismatch")
+              cases = [rfc]
+              namespaces = [uuid.NAMESPACE_DNS,uuid.NAMESPACE_URL,uuid.NAMESPACE_OID,uuid.NAMESPACE_X500,
+                            uuid.UUID(int=0),uuid.UUID(int=(1<<128)-1),
+                            uuid.UUID("12345678-1234-5678-9abc-def012345678")]
+              names = ["", "www.example.com", "Espa\u00f1a, acci\u00f3n", "e\u0301", "\U0001f680", "\u6f22\u5b57",
+                       "a\u0000b", "x" * 65536, "\u00e9" * 32768]
+              for namespace in namespaces:
+                  for name in names:
+                      cases.append({"namespace":str(namespace),"name":name,"expected":str(uuid.uuid5(namespace,name))})
+              rng = random.Random(9562)
+              for index in range(80):
+                  namespace = uuid.UUID(int=rng.getrandbits(128))
+                  name = "public-vector-" + str(index) + "-" + chr(0x400 + index)
+                  cases.append({"namespace":str(namespace),"name":name,"expected":str(uuid.uuid5(namespace,name))})
+              return cases
+
+
+          def prepare(archive_bytes, destination):
+              original, patched = source(archive_bytes)
+              destination.mkdir()
+              (destination / "Uuidv5-original.swift").write_bytes(original)
+              (destination / "Uuidv5-patched.swift").write_bytes(patched)
+              (destination / "main.swift").write_text(SWIFT_MAIN,encoding="utf-8",newline="\n")
+              cases = vectors()
+              (destination / "vectors.json").write_text(json.dumps(cases,ensure_ascii=True),encoding="utf-8",newline="\n")
+              print(json.dumps({"publicVendorVersion":"57.0.19","sriVerified":True,
+                                "originalSha256":ORIGINAL_SHA,"patchedSha256":PATCHED_SHA,
+                                "pythonReferenceVectors":len(cases),"privateSourceRead":False,"appTested":False}))
+
+
+          if __name__ == "__main__":
+              request = urllib.request.Request(URL,headers={"User-Agent":"public-vendor-uuid-native-check"})
+              with urllib.request.urlopen(request,timeout=40) as response:
+                  if response.geturl() != URL:
+                      raise ValueError("unexpected vendor download redirect")
+                  data = response.read(40 * 1024 * 1024 + 1)
+              if len(data) > 40 * 1024 * 1024:
+                  raise ValueError("vendor archive exceeds bound")
+              prepare(data,Path("vendor-check"))
+
+          PY
+      - name: Execute corrected public Swift under AddressSanitizer
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/vendor-check"
+          xcrun --find swiftc
+          xcrun swiftc --version
+          xcrun swiftc -g -Onone -sanitize=address Uuidv5-patched.swift main.swift -o uuid-v5-asan-debug
+          ./uuid-v5-asan-debug vectors.json
+          xcrun swiftc -g -O -sanitize=address Uuidv5-patched.swift main.swift -o uuid-v5-asan-release
+          ./uuid-v5-asan-release vectors.json
