@@ -366,13 +366,14 @@ jobs:
           collections = assert_counts(root)
           screen('03-buscar-ofertas', root)
           root = search(root, 'Spiko')
-          node, _ = find_node(root, 'Spiko Letras del Tesoro Euro.', starts=True)
+          node, _ = find_node(root, 'Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
           label = node.get('content-desc', '')
           out.joinpath('spiko-card.txt').write_text(label, encoding='utf-8')
           assert 'RENTABILIDAD PUBLICADA: 2,16 %' in label, label
           assert 'Pendiente de revisión' not in label, label
+          assert 'Referencia documentada · 06/10/2026' in label and 'observado el 06/10/2026' in label, label
           screen('04-spiko-tarjeta', root)
-          tap_observed(root, 'Spiko Letras del Tesoro Euro.', starts=True)
+          tap_observed(root, 'Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
           root = document_detail('05-spiko-ficha', 'Spiko Letras del Tesoro Euro',
                                  ['FICHA DOCUMENTADA', 'FR001400ODL1', 'REFERENCIAS FECHADAS',
                                   'Consultado el 06/10/2026'])
