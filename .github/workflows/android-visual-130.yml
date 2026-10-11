@@ -63,7 +63,7 @@ jobs:
           PY
           ready=NO
           for attempt in 1 2 3; do
-            if gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$SOURCE_JOB/logs" > qa-job.log; then
+            if gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$SOURCE_JOB/logs" > qa-job.log; then
               ready=SI
               break
             fi
