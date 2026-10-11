@@ -42,7 +42,7 @@ env:
   APK_SHA256: ${{ inputs.apk_sha256 || '6b137a5adcbcb0a9c4ced483846d612cef3f04fd5bb0865fa5ce36483a630d55' }}
   APK_BYTES: ${{ inputs.apk_bytes || '85622508' }}
   # One approved revision; restore NO after verified public release.
-  PUBLICAR_RELEASE: ${{ inputs.publicar_release || 'SI' }}
+  PUBLICAR_RELEASE: ${{ inputs.publicar_release || 'NO' }}
   CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
   RELEASE_TAG: v1.3.1
 jobs:
