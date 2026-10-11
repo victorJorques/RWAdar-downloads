@@ -20,8 +20,16 @@ en Google Play ni en la App Store. En iPhone puedes usar la web desde Safari
 y añadirla a la pantalla de inicio.
 
 Consulta gratuita, búsqueda, fichas con fuentes y favoritos guardados en tu
-dispositivo. Esta versión no requiere cuenta y no muestra anuncios ni tramita
-inversiones. La inclusión editorial de las empresas también es gratuita.
+dispositivo. Desde la versión **1.3.0**, puedes crear una cuenta gratuita y
+opcional desde Perfil, usando la misma cuenta y lista de vigilancia que en
+la web. El catálogo no requiere registro. La app no muestra anuncios ni
+tramita inversiones; la inclusión editorial de las empresas también es gratuita.
+
+La confirmación de correo y la recuperación de acceso se completan en la web;
+después puedes volver a entrar en la app. La sesión no se guarda entre arranques.
+Los favoritos locales y el progreso de Academy permanecen en tu dispositivo,
+separados de la lista de vigilancia de tu cuenta. Si un correo de acceso no
+aparece, revisa también spam: la entregabilidad aún requiere mejoras.
 
 Las actualizaciones se descargan desde esta misma página. La firma permanece
 constante y cada versión incluye su suma SHA-256 para comprobar el archivo.
