@@ -76,7 +76,9 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import base64, hashlib, io, json, os, pathlib, re, zipfile
-          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8')
+          # GitHub concatenates log blocks with UTF-8 BOMs; these are transport,
+          # never base64 data. Exact size, sequence, SHA and ZIP CRC remain required.
+          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8').replace('\ufeff', '')
           prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
           metadata = re.findall(prefix + r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)$', log, re.MULTILINE)
           chunks = re.findall(prefix + r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)$', log, re.MULTILINE)
