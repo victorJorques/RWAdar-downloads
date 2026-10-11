@@ -83,6 +83,12 @@ jobs:
           endings = re.findall(prefix + r'RWADAR_QA_ZIP_END$', log, re.MULTILINE)
           assert len(metadata) == 1 and len(endings) == 1, 'Missing/duplicate ZIP markers'
           digest, size, count = metadata[0]
+          raw_rows = re.findall(r'RWADAR_QA_ZIP_DATA (\d{6}) ([^\r\n]+)', log)
+          strict_indices = {index for index, _ in chunks}
+          invalid = [{'index': index, 'length': len(value), 'masked': '***' in value,
+                      'ansi': '\x1b' in value} for index, value in raw_rows if index not in strict_indices]
+          print('RWADAR_ZIP_COUNTS ' + json.dumps({'bytes': int(size), 'declared': int(count),
+                 'strict': len(chunks), 'raw': len(raw_rows), 'invalid': invalid[:5]}))
           assert 0 < int(size) <= 12 * 1024 * 1024 and len(chunks) == int(count)
           assert [int(index) for index, _ in chunks] == list(range(int(count))), 'Incomplete/out-of-order ZIP chunks'
           payload = base64.b64decode(''.join(chunk for _, chunk in chunks), validate=True)
