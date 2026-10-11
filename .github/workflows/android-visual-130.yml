@@ -1,0 +1,124 @@
+# Copy ONLY this public read-only workflow to .github/workflows/android-visual-130.yml.
+# It reads a completed QA run; it never publishes an app/release or uploads artifacts.
+name: RWAdar 1.3.0 - Read two verified native screenshots
+run-name: RWAdar 1.3.0 native visual evidence - read only
+on:
+  push:
+    branches: [codex/android-130-release]
+    paths: [.github/workflows/android-visual-130.yml]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: rwadar-apk13-visual-readonly
+  cancel-in-progress: false
+env:
+  SOURCE_RUN: '38126514363'
+  SOURCE_JOB: '114431885819'
+  SOURCE_HEAD: e2ffc88366ee3253f2d67b057eb9a8859484d97b
+  APK_SHA256: 0bc76f885a4dde467e428e0abb9eddb773092d36f9bc474227e487ce96dbda32
+  APK_BYTES: '85622388'
+  CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+jobs:
+  visual:
+    # Matrix creates TWO separate jobs/logs, one PNG per job, never one large log.
+    name: Native screenshot read-only - ${{ matrix.capture }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - capture: signup
+            png: 10-perfil-alta-sin-aceptacion.png
+          - capture: offers
+            png: 03-buscar-ofertas.png
+    env:
+      GH_TOKEN: ${{ github.token }}
+      CAPTURE: ${{ matrix.capture }}
+      PNG_NAME: ${{ matrix.png }}
+    steps:
+      - name: Read the fixed successful QA job and its existing log only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
+          test "$GITHUB_REF" = refs/heads/codex/android-130-release
+          gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$SOURCE_JOB" > source-job.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > source-run.json
+          python3 - <<'PY'
+          import json, os, pathlib
+          job = json.loads(pathlib.Path('source-job.json').read_text())
+          run = json.loads(pathlib.Path('source-run.json').read_text())
+          assert str(job['id']) == os.environ['SOURCE_JOB'] and job['name'] == 'android'
+          assert str(job['run_id']) == os.environ['SOURCE_RUN']
+          assert job['head_sha'] == os.environ['SOURCE_HEAD']
+          assert job['status'] == 'completed' and job['conclusion'] == 'success'
+          assert str(run['id']) == os.environ['SOURCE_RUN'] and run['run_attempt'] == 1
+          assert run['head_sha'] == os.environ['SOURCE_HEAD'] and run['head_branch'] == 'codex/android-130-release'
+          assert run['path'] == '.github/workflows/android-smoke-130.yml'
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['repository']['full_name'] == 'victorJorques/RWAdar-downloads'
+          assert run['repository']['private'] is False
+          PY
+          ready=NO
+          for attempt in 1 2 3; do
+            if gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$SOURCE_JOB/logs" > qa-job.log; then
+              ready=SI
+              break
+            fi
+            sleep 5
+          done
+          test "$ready" = SI
+      - name: Validate the existing ZIP and emit one bounded PNG as data
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, zipfile
+          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8')
+          prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
+          metadata = re.findall(prefix + r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)$', log, re.MULTILINE)
+          chunks = re.findall(prefix + r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)$', log, re.MULTILINE)
+          endings = re.findall(prefix + r'RWADAR_QA_ZIP_END$', log, re.MULTILINE)
+          assert len(metadata) == 1 and len(endings) == 1, 'Missing/duplicate ZIP markers'
+          digest, size, count = metadata[0]
+          assert 0 < int(size) <= 12 * 1024 * 1024 and len(chunks) == int(count)
+          assert [int(index) for index, _ in chunks] == list(range(int(count))), 'Incomplete/out-of-order ZIP chunks'
+          payload = base64.b64decode(''.join(chunk for _, chunk in chunks), validate=True)
+          assert len(payload) == int(size) and hashlib.sha256(payload).hexdigest() == digest, 'ZIP integrity mismatch'
+          with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+              files = archive.infolist()
+              assert 0 < len(files) <= 200 and len({f.filename for f in files}) == len(files)
+              assert all(re.fullmatch(r'evidence/[A-Za-z0-9_.-]+\.(?:png|xml|json|txt|log)', f.filename) for f in files)
+              assert sum(f.file_size for f in files) <= 24 * 1024 * 1024 and all(f.file_size <= 4 * 1024 * 1024 for f in files)
+              assert archive.testzip() is None, 'ZIP CRC failure'
+              result = json.loads(archive.read('evidence/result.json'))
+              assert result['version'] == '1.3.0' and result['versionCode'] == 13
+              assert result['apkSha256'] == os.environ['APK_SHA256'] and result['apkBytes'] == int(os.environ['APK_BYTES'])
+              assert result['certificateSha256'] == os.environ['CERT_SHA256']
+              assert result['headSha'] == os.environ['SOURCE_HEAD'] and str(result['runId']) == os.environ['SOURCE_RUN']
+              assert result['installation'] and result['launch'] and result['localFavoritePersistsAfterRestart']
+              assert result['emptyLoginValidation'] and result['passwordInputsMasked']
+              assert result['credentialsEntered'] is False and result['termsAccepted'] is False
+              assert result['authEndToEndTested'] is False and result['smtpTested'] is False and result['physicalDevice'] is False
+              assert os.environ['PNG_NAME'] in {'10-perfil-alta-sin-aceptacion.png', '03-buscar-ofertas.png'}
+              png = archive.read('evidence/' + os.environ['PNG_NAME'])
+          assert png.startswith(b'\x89PNG\r\n\x1a\n'), 'Not a PNG screenshot'
+          # 600 KiB -> <850 KiB of numbered base64+timestamp log output.
+          # Do NOT resize or alter the screenshot, or emit a larger MCP payload.
+          assert 0 < len(png) <= 600 * 1024, 'PNG too large for one bounded MCP log'
+          png_digest = hashlib.sha256(png).hexdigest()
+          encoded = base64.b64encode(png).decode('ascii')
+          png_chunks = [encoded[i:i+1024] for i in range(0, len(encoded), 1024)]
+          print('RWADAR_VISUAL_RESULT ' + json.dumps(result, separators=(',', ':')), flush=True)
+          print(f'RWADAR_VISUAL_SOURCE_ZIP {digest} {size}', flush=True)
+          print(f"RWADAR_VISUAL_PNG_META {os.environ['PNG_NAME']} {png_digest} {len(png)} {len(png_chunks)}", flush=True)
+          for index, chunk in enumerate(png_chunks):
+              print(f'RWADAR_VISUAL_PNG_DATA {index:06d} {chunk}')
+          print('RWADAR_VISUAL_PNG_END', flush=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f"## Read-only verified screenshot: {os.environ['PNG_NAME']}\n")
+              summary.write(f"PNG SHA-256: {png_digest}\n\nPNG bytes: {len(png)}\n\nSource QA run: {os.environ['SOURCE_RUN']}\n")
+              summary.write('One numbered PNG payload in this job log. No account credentials, terms acceptance, publishing, artifact/cache upload, or new paid service.\n')
+          PY
