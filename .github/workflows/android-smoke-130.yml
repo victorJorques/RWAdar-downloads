@@ -41,7 +41,8 @@ env:
   APK_URL: ${{ inputs.apk_url || 'https://expo.dev/artifacts/eas/Jh-m2xO1U1-ZWgqJsAxEJaKHpdvOdW01zhwOCyIhi-k.apk' }}
   APK_SHA256: ${{ inputs.apk_sha256 || '0bc76f885a4dde467e428e0abb9eddb773092d36f9bc474227e487ce96dbda32' }}
   APK_BYTES: ${{ inputs.apk_bytes || '85622388' }}
-  PUBLICAR_RELEASE: ${{ inputs.publicar_release || 'NO' }}
+  # One approved publication; restore NO immediately after verified release.
+  PUBLICAR_RELEASE: ${{ inputs.publicar_release || 'SI' }}
   CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
   RELEASE_TAG: v1.3.0
 jobs:
@@ -666,7 +667,7 @@ jobs:
           # Completed job logs can take a little time to become downloadable.
           ready=NO
           for attempt in 1 2 3 4 5 6; do
-            if gh api "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" > qa-job.log; then
+            if gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" > qa-job.log; then
               ready=SI
               break
             fi
@@ -675,7 +676,9 @@ jobs:
           test "$ready" = SI
           python3 - <<'PY'
           import base64, hashlib, io, json, os, pathlib, re, zipfile
-          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8')
+          # GitHub concatenates log blocks with UTF-8 BOMs; these are transport,
+          # never base64 data. Exact size, sequence, SHA and ZIP CRC remain required.
+          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8').replace('\ufeff', '')
           # Anchor after the optional GitHub ISO timestamp. Echoed script source
           # cannot be mistaken for emitted lines, and sequence/size/hash are exact.
           prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
