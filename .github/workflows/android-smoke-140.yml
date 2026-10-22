@@ -1,4 +1,4 @@
-# Restore the observed Profile viewport before testing English account controls.
+# Use the exact mGLO provider query while retaining all native fees assertions.
 # LOCAL TEMPLATE ONLY: copy this file to .github/workflows/android-smoke-140.yml
 # in the PUBLIC victorJorques/RWAdar-downloads repository after review.
 # Never copy private application source, environment files or signing keys.

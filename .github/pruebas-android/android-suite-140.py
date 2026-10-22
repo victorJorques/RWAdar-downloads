@@ -423,7 +423,8 @@ def integral_native_checks():
     for sample in [('mF-ONE','0,6% anual sobre AUM'),('mGLO','0,40% anual sobre AUM')]:
         title_cost,management = sample
         open_collection('principales')
-        open_observed_offer(title_cost,title_cost)
+        # The title fragment mGLO also matches mGLOBAL; its provider disambiguates the observed search.
+        open_observed_offer('mGLO Midas' if title_cost == 'mGLO' else title_cost,title_cost)
         prefix = '28-costes-' + ('mf-one' if title_cost == 'mF-ONE' else 'mglo')
         document_detail(prefix,title_cost,['Costes publicados','Comisión de gestión · 22/10/2026',
             management,'Comisión de éxito · 22/10/2026','0%','Consultado el 22/10/2026'],scan_to_end=True)
