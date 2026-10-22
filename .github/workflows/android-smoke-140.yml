@@ -1,0 +1,300 @@
+# LOCAL TEMPLATE ONLY: copy this file to .github/workflows/android-smoke-140.yml
+# in the PUBLIC victorJorques/RWAdar-downloads repository after review.
+# Never copy private application source, environment files or signing keys.
+# This public APK's identity is fixed below. Unknown/mismatched builds fail closed.
+# QA ONLY: this workflow has no release job or contents write permission.
+# A separate android-release-140.yml requires a completed QA run and explicit
+# confirmation that its own screenshots and exact evidence have been reviewed.
+name: RWAdar 1.4.0 - Android emulator QA only
+run-name: RWAdar 1.4.0 APK18 native QA
+on:
+  push:
+    branches: [codex/android-140-release]
+    paths: [.github/workflows/android-smoke-140.yml]
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: Exact anonymous EAS APK18 URL (HTTPS)
+        required: true
+        type: string
+      apk_sha256:
+        description: Exact SHA256 of the APK 1.4.0 code18
+        required: true
+        type: string
+      apk_bytes:
+        description: Exact byte size of that APK
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk18-release
+  cancel-in-progress: false
+env:
+  # Exact metadata of the final EAS APK verified locally by the coordinating agent.
+  # If a retry increments the versionCode, stop: this workflow requires code18.
+  APK_URL: ${{ inputs.apk_url || 'https://expo.dev/artifacts/eas/vQ3yu7AcMwvWC5mcgxkYIlj_J7XmcOF-rh-ZHiiDM8I.apk' }}
+  APK_SHA256: ${{ inputs.apk_sha256 || '350276ec8ed734801d86f5c739596e0e16bea4c6757a97b69b2737a67a7ce3d9' }}
+  APK_BYTES: ${{ inputs.apk_bytes || '88898873' }}
+  SOURCE_HEAD_SHA: '3af20333d042cbd9b8981fbe9613d909b7be3f99'
+  EAS_BUILD_ID: '47bdced4-0217-4b83-8642-24f20b476d74'
+  EXPECTED_COUNTS: '{"plataformas":26,"principales":24,"secundario":21,"en_camino":4}'
+  ORIENTATION_POLICY: 'portrait'
+  LONG_TITLE_QUERY: Pottendorfer
+  LONG_TITLE: 'Vivienda · Pottendorfer Straße 62, Wr. Neustadt'
+  PUBLICAR_RELEASE: 'NO'
+  CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+  RELEASE_TAG: v1.4.0
+jobs:
+  android:
+    # PREPARED ONLY. Set to true only after pinning the reviewed APK identity.
+    if: ${{ true }}
+    # Standard public-repository runner, not a paid larger runner.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    outputs:
+      apk_url: ${{ steps.identity.outputs.apk_url }}
+      apk_sha256: ${{ steps.identity.outputs.apk_sha256 }}
+      apk_bytes: ${{ steps.identity.outputs.apk_bytes }}
+      evidence_sha256: ${{ steps.evidence.outputs.evidence_sha256 }}
+      evidence_bytes: ${{ steps.evidence.outputs.evidence_bytes }}
+    env:
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      HEAD_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+    steps:
+      - name: Read the public test suite from this exact QA commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: victorJorques/RWAdar-downloads
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Download the exact public APK and verify identity
+        id: identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
+          test "$GITHUB_REF" = refs/heads/codex/android-140-release
+          test "$PUBLICAR_RELEASE" = NO
+          [[ "$SOURCE_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$EAS_BUILD_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]
+          [[ "$APK_SHA256" != 998d0aed3b183b8f045c36e2772421da806e0e0996e5513de8549ccc13f3fdf9 ]]
+          [[ "$APK_SHA256" != 6b137a5adcbcb0a9c4ced483846d612cef3f04fd5bb0865fa5ce36483a630d55 ]]
+          mkdir -p evidence
+          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
+          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$APK_SHA256" != 593099b7c23d420da0aa361d74d4760b6e73368089849a57887489e7cfb1a255 ]]
+          [[ "$APK_SHA256" != 816f07a6d8563ebfb601be6810b564e6ebaeb49f865226ce2112f7635032884b ]]
+          [[ "$APK_BYTES" =~ ^[1-9][0-9]{6,8}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 "$APK_URL" -o rwadar.apk
+          test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
+          printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > evidence/signature.txt
+          test "$(grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:' evidence/signature.txt)" = 1
+          grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" evidence/signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > evidence/package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='18' versionName='1.4.0'" evidence/package.txt
+          grep -Fx "sdkVersion:'24'" evidence/package.txt
+          grep -Fx "targetSdkVersion:'36'" evidence/package.txt
+          test "$(grep -c '^uses-permission:' evidence/package.txt)" = 4
+          if grep -q '^uses-permission-sdk-' evidence/package.txt; then exit 1; fi
+          grep '^uses-permission:' evidence/package.txt | grep -Ev "name='(android.permission.(INTERNET|ACCESS_NETWORK_STATE|VIBRATE)|com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION)'" > evidence/unexpected-permissions.txt || true
+          test ! -s evidence/unexpected-permissions.txt
+          if grep -Eq "uses-permission:.*(SYSTEM_ALERT_WINDOW|RECEIVE_BOOT_COMPLETED|USE_BIOMETRIC|USE_FINGERPRINT|POST_NOTIFICATIONS|RECORD_AUDIO|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE)" evidence/package.txt; then
+            exit 1
+          fi
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree rwadar.apk AndroidManifest.xml > evidence/manifest.txt
+          python3 - <<'PY'
+          import pathlib, re
+          manifest = pathlib.Path('evidence/manifest.txt').read_text(encoding='utf-8')
+          assert re.search(r'android:allowBackup\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Backup must remain disabled'
+          assert re.search(r'expo\.modules\.updates\.ENABLED[\s\S]{0,240}android:value\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Expo OTA must remain disabled'
+          assert not re.search(r'android:(debuggable|usesCleartextTraffic)\([^)]*\)=\(type 0x12\)0xffffffff\b', manifest), 'No debug or cleartext-enabled APK'
+          badging = pathlib.Path('evidence/package.txt').read_text(encoding='utf-8')
+          permissions = re.findall(r"^uses-permission(?:-sdk-\d+)?: name='([^']+)'", badging, re.MULTILINE)
+          expected = {'android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE',
+                      'android.permission.VIBRATE', 'com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'}
+          assert len(permissions) == 4 and set(permissions) == expected, 'Unexpected or duplicate manifest permissions'
+          PY
+          printf 'apk_url=%s\napk_sha256=%s\napk_bytes=%s\npublicar_release=%s\n' "$APK_URL" "$APK_SHA256" "$APK_BYTES" "$PUBLICAR_RELEASE" >> "$GITHUB_OUTPUT"
+      - name: Prepare official Android emulator on an ephemeral runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/rwadar-android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'ANDROID_USER_HOME=%s\nANDROID_AVD_HOME=%s\n' "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          test -c /dev/kvm
+          # Narrow grant on this disposable runner only; no account permission changes.
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+          # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
+          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          command -v adb
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar_smoke.avd"
+          "$ANDROID_HOME/emulator/emulator" -list-avds | tee evidence/avds.txt
+          grep -Fx 'rwadar_smoke' evidence/avds.txt
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
+          timeout 180 adb wait-for-device
+          timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb install --no-streaming rwadar.apk
+      - name: Compile a disposable UI snapshot test harness, never modify the product APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Stock uiautomator dump waits for idle and can leave a stale file on animated screens.
+          # Use the documented Instrumentation/UiAutomation APIs to read the current tree directly.
+          # This helper has no activity, network permission, product code, credentials or private key.
+          mkdir -p ui-helper/classes ui-helper/dex
+          python3 - <<'PY'
+          from pathlib import Path
+          Path('ui-helper/AndroidManifest.xml').write_text('''<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.rwadar.smoketest">
+            <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="35"/>
+            <application android:label="RWAdar CI snapshot" android:allowBackup="false"/>
+            <instrumentation android:name="com.rwadar.smoketest.DumpRunner" android:targetPackage="com.rwadar.smoketest"/>
+          </manifest>''', encoding='utf-8')
+          Path('ui-helper/DumpRunner.java').write_text(r'''package com.rwadar.smoketest;
+          import android.app.Instrumentation;
+          import android.app.UiAutomation;
+          import android.graphics.Rect;
+          import android.os.Bundle;
+          import android.os.SystemClock;
+          import android.util.Xml;
+          import android.view.accessibility.AccessibilityNodeInfo;
+          import java.io.StringWriter;
+          import org.xmlpull.v1.XmlSerializer;
+          public final class DumpRunner extends Instrumentation {
+            @Override public void onCreate(Bundle args) { super.onCreate(args); start(); }
+            private static String value(CharSequence value) { return value == null ? "" : value.toString(); }
+            private static void node(XmlSerializer xml, AccessibilityNodeInfo info, int depth) throws Exception {
+              if (depth > 100) throw new IllegalStateException("Hierarchy too deep");
+              Rect bounds = new Rect(); info.getBoundsInScreen(bounds);
+              xml.startTag(null, "node");
+              xml.attribute(null, "text", value(info.getText()));
+              xml.attribute(null, "content-desc", value(info.getContentDescription()));
+              xml.attribute(null, "package", value(info.getPackageName()));
+              xml.attribute(null, "class", value(info.getClassName()));
+              xml.attribute(null, "clickable", Boolean.toString(info.isClickable()));
+              xml.attribute(null, "enabled", Boolean.toString(info.isEnabled()));
+              xml.attribute(null, "password", Boolean.toString(info.isPassword()));
+              xml.attribute(null, "checkable", Boolean.toString(info.isCheckable()));
+              xml.attribute(null, "checked", Boolean.toString(info.isChecked()));
+              xml.attribute(null, "visible", Boolean.toString(info.isVisibleToUser()));
+              xml.attribute(null, "bounds", "["+bounds.left+","+bounds.top+"]["+bounds.right+","+bounds.bottom+"]");
+              for (int i=0; i<info.getChildCount(); i++) {
+                AccessibilityNodeInfo child = info.getChild(i);
+                if (child != null) { node(xml, child, depth+1); child.recycle(); }
+              }
+              xml.endTag(null, "node");
+            }
+            @Override public void onStart() {
+              Bundle result = new Bundle();
+              try {
+                UiAutomation automation = getUiAutomation();
+                AccessibilityNodeInfo root = null;
+                long deadline = SystemClock.uptimeMillis()+5000;
+                while (root == null && SystemClock.uptimeMillis() < deadline) {
+                  root = automation.getRootInActiveWindow();
+                  if (root == null) SystemClock.sleep(100);
+                }
+                if (root == null) throw new IllegalStateException("No active UI root");
+                StringWriter writer = new StringWriter(); XmlSerializer xml = Xml.newSerializer();
+                xml.setOutput(writer); xml.startDocument("UTF-8", true);
+                xml.startTag(null, "hierarchy"); node(xml, root, 0); xml.endTag(null, "hierarchy");
+                xml.endDocument(); root.recycle();
+                result.putString("rwadar_ui", writer.toString()); finish(-1, result);
+              } catch (Throwable error) {
+                result.putString("rwadar_error", error.toString()); finish(1, result);
+              }
+            }
+          }''', encoding='utf-8')
+          PY
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-35/android.jar"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/36.0.0"
+          javac --release 8 -classpath "$ANDROID_JAR" -d ui-helper/classes ui-helper/DumpRunner.java
+          "$BUILD_TOOLS/d8" --lib "$ANDROID_JAR" --min-api 24 --output ui-helper/dex ui-helper/classes/com/rwadar/smoketest/DumpRunner.class
+          "$BUILD_TOOLS/aapt" package -f -M ui-helper/AndroidManifest.xml -I "$ANDROID_JAR" -F ui-helper/unsigned.apk
+          zip -j ui-helper/unsigned.apk ui-helper/dex/classes.dex
+          "$BUILD_TOOLS/zipalign" -f 4 ui-helper/unsigned.apk ui-helper/aligned.apk
+          keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
+          "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
+          adb install --no-streaming ui-helper/test.apk
+      - name: Verify public catalog, local favorite and optional account forms without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/pruebas-android/android-suite-140.py
+      - name: Capture final emulator state and stop the disposable device
+        if: always()
+        shell: bash
+        run: |
+          if adb get-state >/dev/null 2>&1; then
+            adb exec-out screencap -p > evidence/final-state.png || true
+            adb logcat -d -v threadtime AndroidRuntime:E ReactNativeJS:E '*:S' > evidence/final-errors.log || true
+            adb shell dumpsys webviewupdate > evidence/webview-provider.txt || true
+            adb logcat -d -v threadtime chromium:E cr_WebViewFactory:E '*:S' > evidence/webview-errors.log || true
+            adb emu kill || true
+          fi
+      - name: Publish bounded evidence in free job logs, never Actions artifact storage
+        id: evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, zipfile
+          folder = pathlib.Path('evidence')
+          assert folder.is_dir(), 'No evidence directory: nothing to publish'
+          limit_zip = 48 * 1024 * 1024
+          limit_total = 64 * 1024 * 1024
+          total = 0
+          contents = []
+          for path in sorted(folder.iterdir()):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              assert re.fullmatch(r'[A-Za-z0-9_.-]+', path.name), 'Unsafe evidence name'
+              assert path.suffix in {'.png', '.xml', '.json', '.txt', '.log'}, 'Unexpected evidence file'
+              data = path.read_bytes()
+              if path.suffix == '.log':
+                  data = data[-128 * 1024:]  # Last errors only; no unbounded emulator log.
+              assert len(data) <= 4 * 1024 * 1024, 'Evidence file unexpectedly large'
+              total += len(data)
+              assert total <= limit_total, 'Evidence collection exceeds bounded budget'
+              contents.append((path.name, data))
+          assert contents, 'No test evidence'
+          buffer = io.BytesIO()
+          with zipfile.ZipFile(buffer, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+              for name, data in contents:
+                  archive.writestr('evidence/' + name, data)
+          payload = buffer.getvalue()
+          print('RWADAR_QA_INVENTORY ' + json.dumps({
+              'files':[{'name':name, 'bytes':len(data)} for name, data in contents],
+              'uncompressedBytes':total, 'zipBytes':len(payload),
+              'zipLimitBytes':limit_zip, 'uncompressedLimitBytes':limit_total},
+              ensure_ascii=False), flush=True)
+          assert 0 < len(payload) <= limit_zip, 'Evidence ZIP exceeds 48 MiB; do not silently truncate'
+          digest = hashlib.sha256(payload).hexdigest()
+          encoded = base64.b64encode(payload).decode('ascii')
+          chunks = [encoded[i:i+1024] for i in range(0, len(encoded), 1024)]
+          print(f'RWADAR_QA_ZIP_META {digest} {len(payload)} {len(chunks)}', flush=True)
+          for index, chunk in enumerate(chunks):
+              print(f'RWADAR_QA_ZIP_DATA {index:06d} {chunk}')
+          print('RWADAR_QA_ZIP_END', flush=True)
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write(f'evidence_sha256={digest}\nevidence_bytes={len(payload)}\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
+              summary.write(f'## Native APK QA evidence\nZIP SHA-256: {digest}\n\nZIP bytes: {len(payload)}.\n')
+              summary.write('Evidence is encoded in numbered job-log lines; no upload-artifact or cache storage.\n')
+              if folder.joinpath('result.json').exists():
+                  summary.write('\n```json\n' + folder.joinpath('result.json').read_text() + '\n```\n')
+          PY
