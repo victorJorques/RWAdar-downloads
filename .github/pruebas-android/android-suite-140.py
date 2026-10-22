@@ -487,7 +487,8 @@ def integral_native_checks():
 
 
 def language_checks():
-    root = dump()
+    scroll_top()
+    root = wait_ui('Entra en tu cuenta')
     tap_observed(root,'English')
     root = wait_ui('Home','Search','Profile')
     assert find_node(root,'English')[0].get('checked') == 'true'
