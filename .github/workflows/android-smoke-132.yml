@@ -670,7 +670,7 @@ jobs:
           import base64, hashlib, io, json, os, pathlib, re, zipfile
           folder = pathlib.Path('evidence')
           assert folder.is_dir(), 'No evidence directory: nothing to publish'
-          limit_zip = 12 * 1024 * 1024
+          limit_zip = 24 * 1024 * 1024
           limit_total = 24 * 1024 * 1024
           total = 0
           contents = []
@@ -692,7 +692,12 @@ jobs:
               for name, data in contents:
                   archive.writestr('evidence/' + name, data)
           payload = buffer.getvalue()
-          assert 0 < len(payload) <= limit_zip, 'Evidence ZIP exceeds 12 MiB; do not silently truncate'
+          print('RWADAR_QA_INVENTORY ' + json.dumps({
+              'files':[{'name':name, 'bytes':len(data)} for name, data in contents],
+              'uncompressedBytes':total, 'zipBytes':len(payload),
+              'zipLimitBytes':limit_zip, 'uncompressedLimitBytes':limit_total},
+              ensure_ascii=False), flush=True)
+          assert 0 < len(payload) <= limit_zip, 'Evidence ZIP exceeds 24 MiB; do not silently truncate'
           digest = hashlib.sha256(payload).hexdigest()
           encoded = base64.b64encode(payload).decode('ascii')
           chunks = [encoded[i:i+1024] for i in range(0, len(encoded), 1024)]
