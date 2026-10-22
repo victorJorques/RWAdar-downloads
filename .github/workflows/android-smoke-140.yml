@@ -1,3 +1,4 @@
+# Native readiness follows fixed tabs and Browse routes after viewport changes.
 # LOCAL TEMPLATE ONLY: copy this file to .github/workflows/android-smoke-140.yml
 # in the PUBLIC victorJorques/RWAdar-downloads repository after review.
 # Never copy private application source, environment files or signing keys.

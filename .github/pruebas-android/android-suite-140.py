@@ -73,6 +73,19 @@ def screen(name, root=None):
         out.joinpath(name + '.xml').write_text(ET.tostring(root, encoding='unicode'), encoding='utf-8')
 
 
+def capture_failure(name):
+    # Capture the failing viewport before finally restores display/font settings.
+    # Keep the original assertion if either diagnostic operation also fails.
+    for kind, operation in [('png', lambda: screen(name)),
+                            ('xml', lambda: out.joinpath(name + '.xml').write_text(
+                                ET.tostring(dump(timeout=10), encoding='unicode'), encoding='utf-8'))]:
+        try:
+            operation()
+        except Exception as error:
+            with out.joinpath('failure-capture-errors.log').open('a', encoding='utf-8') as log:
+                log.write(name + '.' + kind + ': ' + type(error).__name__ + '\n')
+
+
 def display_size():
     data = subprocess.run(['adb', 'exec-out', 'screencap', '-p'], check=True, capture_output=True, timeout=20).stdout
     assert data.startswith(b'\x89PNG'), 'Need actual rotated display dimensions'
@@ -99,6 +112,18 @@ def tap_observed(root, label, starts=False):
     return node
 
 
+def open_platform_radar(english=False):
+    # Every process restart opens Home; Search defaults to offers. Enter both
+    # observed navigation levels explicitly before looking for radar points.
+    labels = ('Home', 'Search', 'Profile') if english else ('Inicio', 'Buscar', 'Perfil')
+    root = wait_ui(*labels)
+    tap_observed(root, 'Search' if english else 'Buscar')
+    platforms = 'Show platforms' if english else 'Mostrar plataformas'
+    root = wait_ui(platforms)
+    tap_observed(root, platforms, starts=True)
+    return wait_ui('Explore documented information' if english else 'Explora lo verificado')
+
+
 def radar_center_checks():
     # Exercise actual input events at each observed visible point centre. The
     # native receiver may be a different overlapping box; the opened platform
@@ -113,7 +138,7 @@ def radar_center_checks():
         adb('shell','settings','put','system','font_scale','1.0')
         adb('shell','am','force-stop','com.rwadar.app')
         adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-        wait_ui('Noticias de RWAdar')
+        open_platform_radar()
         for _ in range(12):
             root = dump()
             points = []
@@ -128,7 +153,11 @@ def radar_center_checks():
                     points.append({'name':name,'label':label,'bounds':bounds})
             if len(points) == expected_counts['plataformas']:
                 break
-            scroll_down()
+            # Small observed drags cannot skip the complete graph on a short
+            # display. All 26 actual bounds must still be visible together.
+            adb('shell','input','swipe',str(width//2),str(int(height*.65)),
+                str(width//2),str(int(height*.53)),'450')
+            time.sleep(.5)
         assert len(points) == expected_counts['plataformas'], 'Need every actual radar point visible before centre taps'
         assert len({p['name'] for p in points}) == len(points), 'Radar point names must be unique'
         screen('00-radar-320dp-centros',root)
@@ -162,6 +191,9 @@ def radar_center_checks():
         out.joinpath('radar-native-centres.json').write_text(json.dumps({'display':[width,height],
             'densityDpi':480,'widthDp':320,'points':reports,
             'scope':'Exact visible centres, not 44dp exclusive touch regions or TalkBack traversal'},indent=2),encoding='utf-8')
+    except Exception:
+        capture_failure('00-radar-320dp-failure')
+        raise
     finally:
         density = re.search(r'Override density:\s*(\d+)',prior_density)
         size = re.search(r'Override size:\s*(\d+x\d+)',prior_size)
@@ -170,7 +202,7 @@ def radar_center_checks():
         adb('shell','settings','put','system','font_scale',prior_font if prior_font not in ('','null') else '1.0')
         adb('shell','am','force-stop','com.rwadar.app')
         adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-        wait_ui('Noticias de RWAdar')
+        wait_ui('Inicio','Buscar','Perfil')
     return {'checked':True,'count':len(reports),'widthDp':320,'changedTouchesPresent':True,
             'allVisibleCentresOpenOwnPlatform':True,'exclusive44DpRegionsTested':False}
 
@@ -379,8 +411,7 @@ def integral_native_checks():
         adb('shell','wm','size','900x1600')
         adb('shell','am','force-stop','com.rwadar.app')
         adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-        root = wait_ui('Noticias de RWAdar')
-        tap_observed(root,'Buscar'); root = wait_ui('Explora lo verificado')
+        root = open_platform_radar()
         tap_observed(root,'Mostrar ofertas',starts=True); wait_ui('Ofertas específicas')
         open_collection('principales')
         root = open_observed_offer(os.environ['LONG_TITLE_QUERY'],title)
@@ -403,6 +434,9 @@ def integral_native_checks():
             assert os.environ['ORIENTATION_POLICY'] == 'portrait'
         orientation = {'policy':os.environ['ORIENTATION_POLICY'],'requested':'landscape','display':size,
                        'landscapeTested':landscape,'portraitLockIsNotLandscapeCoverage':not landscape}
+    except Exception:
+        capture_failure('24-fuente-grande-failure')
+        raise
     finally:
         adb('shell','settings','put','system','font_scale',prior_font if prior_font not in ('','null') else '1.0')
         adb('shell','settings','put','system','accelerometer_rotation',prior_rotate if prior_rotate not in ('','null') else '0')
@@ -410,7 +444,7 @@ def integral_native_checks():
         adb('shell','wm','size','reset')
         adb('shell','am','force-stop','com.rwadar.app')
         adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-        wait_ui('Noticias de RWAdar')
+        wait_ui('Inicio','Buscar','Perfil')
     packages = adb('shell','pm','list','packages','com.google.android.marvin.talkback')
     talkback = {'installed':'package:com.google.android.marvin.talkback' in packages,'tested':False,
                 'scope':'Accessibility hierarchy is not a TalkBack traversal. Manual speech/focus/gesture review remains pending.'}
@@ -432,10 +466,11 @@ def language_checks():
     screen('40-idioma-english-perfil-sin-credenciales',root)
     adb('shell','am','force-stop','com.rwadar.app')
     adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-    root = wait_ui('RWAdar news','Home','Search','Profile')
+    root = wait_ui('Home','Search','Profile')
     assert find_node(root,'English')[0].get('checked') == 'true', 'English selection must survive process restart'
     screen('41-english-persistente-tras-reinicio',root)
     radar_label = 'ADDX. Equities and private capital. Access status:'
+    open_platform_radar(english=True)
     root = reach_control(radar_label,starts=True)
     tap_observed(root,radar_label,starts=True)
     root = wait_ui('Close platform details for ADDX')
@@ -449,8 +484,6 @@ def language_checks():
     assert events and events[-1]['selectedName'] == 'ADDX' and events[-1]['changedTouches'] >= 1, 'English must preserve native pointer event and destination'
     english_radar_event = events[-1]
     tap_observed(root,'Close platform details for ADDX')
-    root = dump()
-    tap_observed(root,'Search')
     root = wait_ui('Explore documented information')
     tap_observed(root,'Show offers',starts=True)
     root = wait_ui('Specific offers')
@@ -500,7 +533,7 @@ def language_checks():
     wait_ui('Inicio','Buscar','Perfil')
     adb('shell','am','force-stop','com.rwadar.app')
     adb('shell','am','start','-W','-n','com.rwadar.app/.MainActivity')
-    root = wait_ui('Noticias de RWAdar','Inicio','Buscar','Perfil')
+    root = wait_ui('Inicio','Buscar','Perfil')
     assert find_node(root,'Español')[0].get('checked') == 'true', 'Spanish selection must survive process restart'
     screen('43-espanol-persistente-tras-reinicio',root)
     result = {'englishUi':True,'englishPersistedAfterRestart':True,'spanishUi':True,'spanishPersistedAfterRestart':True,
@@ -585,8 +618,8 @@ for tab in ('Inicio', 'Buscar', 'Academy', 'Perfil'):
 screen('01-inicio', root)
 radar_native = radar_center_checks()
 root = dump()
-tap_observed(root, 'Buscar')
-root = wait_ui('Explora lo verificado', str(expected_counts['plataformas']) + ' plataformas')
+root = open_platform_radar()
+assert str(expected_counts['plataformas']) + ' plataformas' in visible_text(root), 'Platform count must remain visible'
 screen('02-buscar-empresas', root)
 tap_observed(root, 'Mostrar ofertas', starts=True)
 root = wait_ui('Ofertas específicas', f"{expected_counts['principales']} principales · {expected_counts['secundario']} secundarias · {expected_counts['en_camino']} en camino")
@@ -730,7 +763,7 @@ screen('16-perfil-reabierto', root)
 adb('shell', 'am', 'force-stop', 'com.rwadar.app')
 restart = adb('shell', 'am', 'start', '-W', '-n', 'com.rwadar.app/.MainActivity')
 assert 'Status: ok' in restart, restart
-root = wait_ui('Noticias de RWAdar')
+root = wait_ui('Inicio','Buscar','Perfil')
 tap_observed(root, 'Perfil')
 root = wait_ui('Entra en tu cuenta')
 assert_empty_field(root, 'Correo')
