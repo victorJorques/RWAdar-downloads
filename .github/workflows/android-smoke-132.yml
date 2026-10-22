@@ -218,18 +218,18 @@ jobs:
           set -euo pipefail
           python3 - <<'PY'
           import json, os, pathlib, re, subprocess, time, xml.etree.ElementTree as ET
-          
+
           out = pathlib.Path('evidence')
-          
-          
+
+
           class TransientSnapshotError(Exception):
               pass
-          
-          
+
+
           def adb(*args, timeout=20):
               return subprocess.run(['adb', *args], check=True, capture_output=True, timeout=timeout).stdout.decode('utf-8', errors='replace')
-          
-          
+
+
           def dump_once(timeout=30):
               raw = adb('shell', 'am', 'instrument', '-w', '-r', 'com.rwadar.smoketest/.DumpRunner', timeout=timeout)
               out.joinpath('latest-ui-instrumentation.txt').write_text(raw, encoding='utf-8')
@@ -241,8 +241,8 @@ jobs:
               root = ET.fromstring(xml)
               out.joinpath('latest-ui.xml').write_text(xml, encoding='utf-8')
               return root
-          
-          
+
+
           def dump(timeout=30):
               deadline = time.monotonic() + timeout
               while True:
@@ -255,12 +255,12 @@ jobs:
                       if remaining <= 0:
                           raise
                       time.sleep(min(2, remaining))
-          
-          
+
+
           def visible_text(root):
               return '\n'.join(value for node in root.iter('node') if node.get('visible') != 'false' for value in [node.get('text', ''), node.get('content-desc', '')] if value)
-          
-          
+
+
           def wait_ui(*texts, timeout=75):
               deadline = time.monotonic() + timeout
               while time.monotonic() < deadline:
@@ -273,16 +273,16 @@ jobs:
                           log.write(str(error) + '\n')
                   time.sleep(2)
               raise AssertionError('Native UI did not visibly show: ' + ', '.join(texts))
-          
-          
+
+
           def screen(name, root=None):
               image = subprocess.run(['adb', 'exec-out', 'screencap', '-p'], check=True, capture_output=True, timeout=20).stdout
               assert image.startswith(b'\x89PNG'), 'Screenshot must be a real PNG'
               out.joinpath(name + '.png').write_bytes(image)
               if root is not None:
                   out.joinpath(name + '.xml').write_text(ET.tostring(root, encoding='unicode'), encoding='utf-8')
-          
-          
+
+
           def find_node(root, label, starts=False):
               candidates = []
               for node in root.iter('node'):
@@ -295,22 +295,22 @@ jobs:
                   if len(bounds) == 4 and bounds[2] > bounds[0] and bounds[3] > bounds[1]:
                       return node, bounds
               raise AssertionError('Accessible control not found: ' + label)
-          
-          
+
+
           def tap_observed(root, label, starts=False):
               node, bounds = find_node(root, label, starts)
               adb('shell', 'input', 'tap', str((bounds[0]+bounds[2])//2), str((bounds[1]+bounds[3])//2))
               return node
-          
-          
+
+
           def scroll_down():
               size = re.search(r'Physical size:\s*(\d+)x(\d+)', adb('shell', 'wm', 'size'))
               assert size, 'Need actual device dimensions for scrolling'
               width, height = map(int, size.groups())
               adb('shell', 'input', 'swipe', str(width//2), str(int(height*.80)), str(width//2), str(int(height*.32)), '450')
               time.sleep(.5)
-          
-          
+
+
           def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to_end=False):
               root = wait_ui('Cerrar ' + title)
               remaining = set(required)
@@ -332,8 +332,8 @@ jobs:
                   previous_text = text
                   scroll_down()
               raise AssertionError('Missing visible documentary evidence: ' + ', '.join(sorted(remaining)))
-          
-          
+
+
           def search(root, query):
               # Reset through the actual accessible native control; do not rely
               # on a stale tree, keyboard shortcuts, or an unobserved coordinate.
@@ -351,8 +351,8 @@ jobs:
               adb('shell', 'input', 'text', query.replace(' ', '%s'))
               adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
               return wait_ui(query, '1 ficha')
-          
-          
+
+
           def assert_counts(root):
               text = visible_text(root)
               match = re.search(r'(\d+) principales · (\d+) secundarias · (\d+) en camino', text)
@@ -375,8 +375,8 @@ jobs:
                   previous = current
                   adb('shell', 'input', 'swipe', str(width//2), str(int(height*.32)), str(width//2), str(int(height*.80)), '350')
                   time.sleep(.3)
-          
-          
+
+
           def reach_control(label, starts=False):
               previous = None
               for _ in range(14):
@@ -391,8 +391,8 @@ jobs:
                       previous = current
                       scroll_down()
               raise AssertionError('Control not reachable by native scrolling: ' + label)
-          
-          
+
+
           def assert_empty_field(root, label, password=False):
               candidates = [n for n in root.iter('node')
                             if n.get('visible') != 'false'
@@ -403,8 +403,8 @@ jobs:
                   assert not field.get('text', ''), 'Smoke must never enter credentials or personal data'
                   assert field.get('enabled') == 'true', 'Input must be usable: ' + label
                   assert field.get('password') == str(password).lower(), 'Password masking mismatch: ' + label
-          
-          
+
+
           # Public, non-secret expectations from the approved editorial-v2 assets.
           # Card locations and detail alt text must identify the new per-offer
           # photo; a generic category fallback deliberately fails this QA.
