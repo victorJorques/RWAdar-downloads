@@ -1,0 +1,154 @@
+# Reviewed identity-only check; full native QA and publication stay separate.
+# Target: public victorJorques/RWAdar-downloads, specific identity workflow path.
+# This read-only job discovers an APK digest; full QA/release keep requiring the
+# independently pinned SHA-256 and are never modified or enabled by this job.
+name: RWAdar 1.4.0 - Read-only APK18 identity
+run-name: RWAdar APK18 identity only
+on:
+  push:
+    branches: [codex/android-140-release]
+    paths: [.github/workflows/android-identity-140.yml]
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk18-identity-only
+  cancel-in-progress: false
+env:
+  APK_URL: https://expo.dev/artifacts/eas/vQ3yu7AcMwvWC5mcgxkYIlj_J7XmcOF-rh-ZHiiDM8I.apk
+  APK_BYTES: '88898873'
+  SOURCE_HEAD_SHA: 3af20333d042cbd9b8981fbe9613d909b7be3f99
+  EAS_BUILD_ID: 47bdced4-0217-4b83-8642-24f20b476d74
+  CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+  PUBLICAR_RELEASE: 'NO'
+jobs:
+  identity:
+    # Inert until the coordinator reviews and explicitly enables THIS template.
+    if: ${{ true }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      WORKFLOW_SHA: ${{ github.workflow_sha }}
+      HEAD_SHA: ${{ github.sha }}
+      RUN_ID: ${{ github.run_id }}
+      RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Verify fixed scope and existing official Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
+          test "$GITHUB_REF" = refs/heads/codex/android-140-release
+          test "$PUBLICAR_RELEASE" = NO
+          test "$APK_URL" = https://expo.dev/artifacts/eas/vQ3yu7AcMwvWC5mcgxkYIlj_J7XmcOF-rh-ZHiiDM8I.apk
+          test "$APK_BYTES" = 88898873
+          test "$SOURCE_HEAD_SHA" = 3af20333d042cbd9b8981fbe9613d909b7be3f99
+          test "$EAS_BUILD_ID" = 47bdced4-0217-4b83-8642-24f20b476d74
+          test -x "$ANDROID_HOME/build-tools/36.0.0/apksigner"
+          test -x "$ANDROID_HOME/build-tools/36.0.0/aapt"
+      - name: Download only the fixed HTTPS APK with an exact streaming byte bound
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, sys, time, urllib.parse, urllib.request
+          def sanitized_failure(kind, value, traceback):
+              # An HTTP exception may contain a signed temporary CDN URL.
+              # Keep only its type; no response, URL, headers or traceback.
+              print('RWADAR_APK_DOWNLOAD_FAILED '+json.dumps({'errorType':kind.__name__,
+                  'downloadComplete':False}), file=sys.stderr, flush=True)
+          sys.excepthook = sanitized_failure
+          url = os.environ['APK_URL']
+          expected = int(os.environ['APK_BYTES'])
+          assert expected == 88898873
+          assert url == 'https://expo.dev/artifacts/eas/vQ3yu7AcMwvWC5mcgxkYIlj_J7XmcOF-rh-ZHiiDM8I.apk'
+          def https_only(value):
+              parsed = urllib.parse.urlsplit(value)
+              assert parsed.scheme == 'https' and parsed.hostname in {
+                  'expo.dev','api.expo.dev','wf-artifacts.eascdn.net'}
+              assert parsed.port in {None,443} and not parsed.username and not parsed.password
+              assert not parsed.fragment, 'Unexpected download URL fragment'
+          class HttpsRedirect(urllib.request.HTTPRedirectHandler):
+              max_redirections = 5
+              def redirect_request(self, request, response, code, message, headers, target):
+                  https_only(target)
+                  return super().redirect_request(request, response, code, message, headers, target)
+          https_only(url)
+          opener = urllib.request.build_opener(HttpsRedirect())
+          request = urllib.request.Request(url, headers={
+              'User-Agent':'RWAdar-APK18-identity-only', 'Accept-Encoding':'identity'})
+          digest = hashlib.sha256()
+          count = 0
+          deadline = time.monotonic() + 360
+          # No authentication, cookies, API token or source checkout is used.
+          with opener.open(request, timeout=45) as response, pathlib.Path('rwadar.apk').open('xb') as target:
+              https_only(response.url)
+              assert response.status == 200
+              if response.headers.get('Content-Length') is not None:
+                  assert int(response.headers['Content-Length']) == expected
+              assert response.headers.get('Content-Encoding', 'identity').lower() == 'identity'
+              while True:
+                  assert time.monotonic() < deadline, 'APK transfer exceeded its time budget'
+                  chunk = response.read(min(1024*1024, expected-count+1))
+                  if not chunk:
+                      break
+                  count += len(chunk)
+                  assert count <= expected, 'APK exceeded its exact byte bound'
+                  target.write(chunk)
+                  digest.update(chunk)
+          assert count == expected, 'APK is truncated'
+          pathlib.Path('apk-sha256.txt').write_text(digest.hexdigest()+'\n', encoding='ascii')
+          PY
+      - name: Verify unique expected signer, APK v2 signature, package, SDK and permissions
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > signature.txt
+          test "$(grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:' signature.txt)" = 1
+          grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" signature.txt > /dev/null
+          grep -Fx 'Verified using v2 scheme (APK Signature Scheme v2): true' signature.txt > /dev/null
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='18' versionName='1.4.0'" package.txt > /dev/null
+          grep -Fx "sdkVersion:'24'" package.txt > /dev/null
+          grep -Fx "targetSdkVersion:'36'" package.txt > /dev/null
+          test "$(grep -c '^uses-permission:' package.txt)" = 4
+          if grep -q '^uses-permission-sdk-' package.txt; then exit 1; fi
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree rwadar.apk AndroidManifest.xml > manifest.txt
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, re
+          apk = pathlib.Path('rwadar.apk')
+          assert apk.stat().st_size == int(os.environ['APK_BYTES']) == 88898873
+          with apk.open('rb') as source:
+              digest = hashlib.file_digest(source, 'sha256').hexdigest()
+          assert digest == pathlib.Path('apk-sha256.txt').read_text(encoding='ascii').strip()
+          assert re.fullmatch(r'[a-f0-9]{64}', digest)
+          signature = pathlib.Path('signature.txt').read_text(encoding='utf-8')
+          signers = re.findall(r'^Signer #[0-9]+ certificate SHA-256 digest: ([a-f0-9]{64})$', signature, re.MULTILINE)
+          assert signers == [os.environ['CERT_SHA256']]
+          assert 'Verified using v2 scheme (APK Signature Scheme v2): true' in signature.splitlines()
+          badging = pathlib.Path('package.txt').read_text(encoding='utf-8')
+          assert re.search(r"^package: name='com.rwadar.app' versionCode='18' versionName='1.4.0'(?: |$)", badging, re.MULTILINE)
+          permissions = re.findall(r"^uses-permission(?:-sdk-\d+)?: name='([^']+)'", badging, re.MULTILINE)
+          expected = {'android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE',
+                      'android.permission.VIBRATE', 'com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'}
+          assert len(permissions) == 4 and set(permissions) == expected
+          manifest = pathlib.Path('manifest.txt').read_text(encoding='utf-8')
+          assert re.search(r'android:allowBackup\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Backup must remain disabled'
+          assert re.search(r'expo\.modules\.updates\.ENABLED[\s\S]{0,240}android:value\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Expo OTA must remain disabled'
+          assert not re.search(r'android:(debuggable|usesCleartextTraffic)\([^)]*\)=\(type 0x12\)0xffffffff\b', manifest)
+          result = {'package':'com.rwadar.app','version':'1.4.0','versionCode':18,
+              'apkUrl':os.environ['APK_URL'],'apkSha256':digest,'apkBytes':apk.stat().st_size,
+              'certificateSha256':os.environ['CERT_SHA256'],'uniqueSigner':True,'signatureV2':True,
+              'minSdk':24,'targetSdk':36,'permissions':sorted(permissions),
+              'backupEnabled':False,'otaEnabled':False,'debuggable':False,'cleartextExplicitlyEnabled':False,
+              'expectedSourceCommit':os.environ['SOURCE_HEAD_SHA'],'expectedEasBuildId':os.environ['EAS_BUILD_ID'],
+              'sourceEasBinding':'coordinator-verified EAS metadata; not a binary source attestation',
+              'publicWorkflowHead':os.environ['HEAD_SHA'],'workflowSha':os.environ['WORKFLOW_SHA'],
+              'runId':os.environ['RUN_ID'],'runAttempt':os.environ['RUN_ATTEMPT'],
+              'qaExecuted':False,'releasePublished':False,'remoteMutations':False}
+          encoded = json.dumps(result, sort_keys=True, separators=(',',':'))
+          assert len(encoded.encode('utf-8')) <= 4096
+          print('RWADAR_APK_IDENTITY '+encoded, flush=True)
+          with pathlib.Path(os.environ['GITHUB_STEP_SUMMARY']).open('a', encoding='utf-8') as summary:
+              summary.write('APK18 identity only; native QA and release remain separate.\n\n```json\n'+encoded+'\n```\n')
+          PY
