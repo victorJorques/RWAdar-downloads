@@ -10,6 +10,7 @@ assert re.fullmatch(r'[a-f0-9]{40}', os.environ['SOURCE_HEAD_SHA'])
 assert re.fullmatch(r'[a-f0-9-]{36}', os.environ['EAS_BUILD_ID'])
 geometry = []
 traversals = {}
+scroll_gestures = []
 
 
 class TransientSnapshotError(Exception):
@@ -208,9 +209,37 @@ def radar_center_checks():
 
 
 def scroll_down():
-    width, height = display_size()
-    adb('shell', 'input', 'swipe', str(width//2), str(int(height*.80)), str(width//2), str(int(height*.32)), '450')
+    swipe_scroll(forward=True)
     time.sleep(.5)
+
+
+def swipe_scroll(forward, root=None):
+    # Fixed headers differ between Home, Search and translated/font-scaled UI.
+    # Use the actual vertical native viewport, never screen-percentage guesses.
+    root = dump() if root is None else root
+    width, height = display_size()
+    regions = []
+    for node in root.iter('node'):
+        if node.get('visible') == 'false' or node.get('class') not in (
+                'android.widget.ScrollView', 'androidx.recyclerview.widget.RecyclerView'):
+            continue
+        bounds = list(map(int, re.findall(r'-?\d+', node.get('bounds', ''))))
+        if len(bounds) != 4:
+            continue
+        left, top, right, bottom = bounds
+        if 0 <= left < right <= width and 0 <= top < bottom <= height and bottom-top >= 80:
+            regions.append(bounds)
+    assert len(regions) == 1, 'Need one unambiguous visible vertical native scroll viewport: ' + str(regions)
+    left, top, right, bottom = regions[0]
+    x = (left+right)//2
+    low = top + int((bottom-top)*.16)
+    high = top + int((bottom-top)*.84)
+    start, end = (high, low) if forward else (low, high)
+    assert top < min(start,end) < max(start,end) < bottom, 'Gesture must stay inside the observed viewport'
+    scroll_gestures.append({'display':[width,height], 'bounds':regions[0],
+        'direction':'forward' if forward else 'backward', 'start':[x,start], 'end':[x,end]})
+    out.joinpath('native-scroll-gestures.json').write_text(json.dumps(scroll_gestures,indent=2),encoding='utf-8')
+    adb('shell','input','swipe',str(x),str(start),str(x),str(end),'450')
 
 
 def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to_end=False):
@@ -269,14 +298,14 @@ def assert_counts(root):
 
 
 def scroll_top():
-    width, height = display_size()
     previous = None
     for _ in range(12):
-        current = visible_text(dump())
+        root = dump()
+        current = visible_text(root)
         if current == previous:
             return
         previous = current
-        adb('shell', 'input', 'swipe', str(width//2), str(int(height*.32)), str(width//2), str(int(height*.80)), '350')
+        swipe_scroll(forward=False,root=root)
         time.sleep(.3)
 
 
@@ -293,6 +322,7 @@ def reach_control(label, starts=False):
                 break
             previous = current
             scroll_down()
+    capture_failure('control-not-reached-' + re.sub(r'[^a-z0-9]+','-',label.lower()).strip('-')[:70])
     raise AssertionError('Control not reachable by native scrolling: ' + label)
 
 
