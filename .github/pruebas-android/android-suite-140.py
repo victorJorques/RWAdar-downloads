@@ -524,6 +524,7 @@ def language_checks():
     adb('shell','input','keyevent','KEYCODE_BACK')
     root = wait_ui('Spiko','1 of ')
     label = 'View details for Spiko Letras del Tesoro Euro.'
+    root = reach_control(label,starts=True)
     card,_ = find_node(root,label,starts=True)
     for text in ('Published minimum in euros:','Access from Spain:','How to get your money back:'):
         assert text in card.get('content-desc',''), 'Card decision labels must switch to English'
@@ -659,6 +660,7 @@ collections = assert_counts(root)
 assert sum(collections.values()) == sum(expected_counts[k] for k in ('principales','secundario','en_camino'))
 screen('03-buscar-ofertas', root)
 root = search(root, 'Spiko')
+root = reach_control('Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
 node, _ = find_node(root, 'Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
 label = node.get('content-desc', '')
 out.joinpath('spiko-card.txt').write_text(label, encoding='utf-8')
@@ -687,6 +689,7 @@ for index, sample in enumerate(editorial_samples[1:], start=1):
     tap_observed(root, group_label)
     root = search(wait_ui('Ofertas específicas'), sample['query'])
     card_label = 'Ver ficha de ' + sample['title'] + '.'
+    root = reach_control(card_label, starts=True)
     card, _ = find_node(root, card_label, starts=True)
     accessible = card.get('content-desc', '')
     assert sample['location'] in accessible and 'Ilustración editorial' in accessible, accessible
