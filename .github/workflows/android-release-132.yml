@@ -1,0 +1,280 @@
+# LOCAL TEMPLATE ONLY: copy to .github/workflows/android-release-132.yml in
+# PUBLIC victorJorques/RWAdar-downloads. Contains no private product source.
+# Default NO is inert. Complete exact reviewed metadata and both SI values
+# only AFTER reviewing this APK's completed QA screenshots and evidence ZIP.
+name: RWAdar 1.3.2 - Release previously reviewed Android QA
+run-name: RWAdar 1.3.2 APK16 reviewed release
+on:
+  push:
+    branches: [codex/android-132-release]
+    paths: [.github/workflows/android-release-132.yml]
+permissions:
+  contents: read
+concurrency:
+  group: rwadar-apk16-reviewed-release
+  cancel-in-progress: false
+env:
+  APK_URL: https://expo.dev/artifacts/eas/tXOv6yjJzj71MReCmcRunqCqo_lK4sEwkZQpGV7vOLY.apk
+  APK_SHA256: 998d0aed3b183b8f045c36e2772421da806e0e0996e5513de8549ccc13f3fdf9
+  APK_BYTES: 88777561
+  PUBLICAR_RELEASE: 'SI'
+  VISUAL_REVIEWED: 'SI'
+  QA_RUN_ID: 39701844100
+  QA_RUN_ATTEMPT: 1
+  EXPECTED_QA_HEAD_SHA: 3b366a3b6e71746e0d8609feaf1e6820b529f96d
+  EVIDENCE_SHA256: 2169efb89b58b3430196aab389f5ce46aaad122f826ff0d636c0c39c650d4041
+  EVIDENCE_BYTES: 13679319
+  CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+  RELEASE_TAG: v1.3.2
+jobs:
+  review_gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+    outputs:
+      publicar_release: ${{ steps.reviewed.outputs.publicar_release }}
+      qa_head_sha: ${{ steps.reviewed.outputs.qa_head_sha }}
+    steps:
+      - name: Bind publication to the exact completed QA execution reviewed locally
+        id: reviewed
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
+          test "$GITHUB_REF" = refs/heads/codex/android-132-release
+          if test "$PUBLICAR_RELEASE" = NO; then
+            printf 'publicar_release=NO\n' >> "$GITHUB_OUTPUT"
+            echo 'Release remains disabled; no APK or release write.'
+            exit 0
+          fi
+          test "$PUBLICAR_RELEASE" = SI
+          test "$VISUAL_REVIEWED" = SI
+          [[ "$QA_RUN_ID" =~ ^[1-9][0-9]{5,14}$ ]]
+          [[ "$QA_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,2}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QA_RUN_ID/attempts/$QA_RUN_ATTEMPT" > qa-run.json
+          python3 - <<'PY'
+          import json, os, pathlib
+          run = json.loads(pathlib.Path('qa-run.json').read_text())
+          assert str(run['id']) == os.environ['QA_RUN_ID']
+          assert str(run['run_attempt']) == os.environ['QA_RUN_ATTEMPT']
+          assert run['status'] == 'completed' and run['conclusion'] == 'success'
+          assert run['repository']['full_name'] == 'victorJorques/RWAdar-downloads'
+          assert run['head_branch'] == 'codex/android-132-release'
+          assert run['path'] == '.github/workflows/android-smoke-132.yml'
+          assert run['event'] in {'push', 'workflow_dispatch'}
+          assert len(run['head_sha']) == 40
+          assert run['head_sha'] == os.environ['EXPECTED_QA_HEAD_SHA']
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as target:
+              target.write('qa_head_sha=' + run['head_sha'] + '\npublicar_release=SI\n')
+          PY
+  release:
+    name: Publish SAME APK after completed QA and visual evidence review
+    needs: review_gate
+    if: ${{ needs.review_gate.outputs.publicar_release == 'SI' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Only this job can write a public release. No additional PAT or secret.
+    permissions:
+      contents: write
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RUN_ID: ${{ github.run_id }}
+      QA_HEAD_SHA: ${{ needs.review_gate.outputs.qa_head_sha }}
+    steps:
+      - name: Re-download and verify the byte-identical APK that passed the emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
+          test "$GITHUB_REF" = refs/heads/codex/android-132-release
+          test "$PUBLICAR_RELEASE" = SI
+          test "$RELEASE_TAG" = v1.3.2
+          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
+          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$APK_BYTES" =~ ^[1-9][0-9]{6,8}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 "$APK_URL" -o RWAdar.apk
+          test "$(stat -c '%s' RWAdar.apk)" = "$APK_BYTES"
+          printf '%s  RWAdar.apk\n' "$APK_SHA256" | sha256sum --check
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs RWAdar.apk > signature.txt
+          test "$(grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:' signature.txt)" = 1
+          grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" signature.txt
+          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging RWAdar.apk > package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='16' versionName='1.3.2'" package.txt
+          printf '%s  RWAdar.apk\n' "$APK_SHA256" > SHA256SUMS.txt
+      - name: Recover exact QA evidence from its completed job logs before any release write
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EVIDENCE_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$EVIDENCE_BYTES" =~ ^[1-9][0-9]{0,7}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$QA_RUN_ID/attempts/$QA_RUN_ATTEMPT/jobs?per_page=100" > qa-jobs.json
+          job_id="$(python3 - <<'PY'
+          import json, os, pathlib
+          jobs = json.loads(pathlib.Path('qa-jobs.json').read_text())['jobs']
+          matches = [job for job in jobs if job['name'] == 'android'
+                     and str(job['run_id']) == os.environ['QA_RUN_ID']
+                     and job['head_sha'] == os.environ['QA_HEAD_SHA']
+                     and job['status'] == 'completed' and job['conclusion'] == 'success']
+          assert len(matches) == 1, 'Need exactly one successful QA job for THIS run attempt'
+          print(matches[0]['id'])
+          PY
+          )"
+          # Completed job logs can take a little time to become downloadable.
+          ready=NO
+          for attempt in 1 2 3 4 5 6; do
+            if gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/$job_id/logs" > qa-job.log; then
+              ready=SI
+              break
+            fi
+            sleep 10
+          done
+          test "$ready" = SI
+          python3 - <<'PY'
+          import base64, hashlib, io, json, os, pathlib, re, zipfile
+          # GitHub concatenates log blocks with UTF-8 BOMs; these are transport,
+          # never base64 data. Exact size, sequence, SHA and ZIP CRC remain required.
+          log = pathlib.Path('qa-job.log').read_text(encoding='utf-8').replace('\ufeff', '')
+          # Anchor after the optional GitHub ISO timestamp. Echoed script source
+          # cannot be mistaken for emitted lines, and sequence/size/hash are exact.
+          prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
+          metadata = re.findall(prefix + r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)$', log, re.MULTILINE)
+          chunks = re.findall(prefix + r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)$', log, re.MULTILINE)
+          endings = re.findall(prefix + r'RWADAR_QA_ZIP_END$', log, re.MULTILINE)
+          assert len(metadata) == 1 and len(endings) == 1, 'Missing/duplicate evidence markers'
+          digest, size, count = metadata[0]
+          assert digest == os.environ['EVIDENCE_SHA256'] and int(size) == int(os.environ['EVIDENCE_BYTES'])
+          assert 0 < int(size) <= 24 * 1024 * 1024 and len(chunks) == int(count)
+          assert [int(index) for index, _ in chunks] == list(range(int(count))), 'Incomplete/out-of-order ZIP chunks'
+          payload = base64.b64decode(''.join(chunk for _, chunk in chunks), validate=True)
+          assert len(payload) == int(size) and hashlib.sha256(payload).hexdigest() == digest, 'Evidence ZIP identity mismatch'
+          with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+              files = archive.infolist()
+              assert 0 < len(files) <= 200
+              assert all(re.fullmatch(r'evidence/[A-Za-z0-9_.-]+\.(?:png|xml|json|txt|log)', f.filename) for f in files)
+              print('RWADAR_QA_INVENTORY ' + json.dumps({
+                  'files':[{'name':f.filename, 'bytes':f.file_size} for f in files],
+                  'uncompressedBytes':sum(f.file_size for f in files),
+                  'zipBytes':len(payload)}, ensure_ascii=False), flush=True)
+              assert sum(f.file_size for f in files) <= 24 * 1024 * 1024 and all(f.file_size <= 4 * 1024 * 1024 for f in files)
+              assert archive.testzip() is None, 'ZIP CRC failure'
+              result = json.loads(archive.read('evidence/result.json'))
+          assert result['version'] == '1.3.2' and result['versionCode'] == 16
+          assert result['apkSha256'] == os.environ['APK_SHA256'] and result['apkBytes'] == int(os.environ['APK_BYTES'])
+          assert result['certificateSha256'] == os.environ['CERT_SHA256']
+          assert result['headSha'] == os.environ['QA_HEAD_SHA'] and str(result['runId']) == os.environ['QA_RUN_ID']
+          assert result['workflowSha'] == os.environ['QA_HEAD_SHA']
+          assert result['installation'] and result['launch'] and result['localFavoritePersistsAfterRestart']
+          assert result['visibleCatalogPlatforms'] == 26 and result['catalogSchemaVersion'] == 2
+          assert result['collections'] == {'principales':24, 'secundario':21, 'en_camino':4}
+          assert result['spikoDocumentaryDetail'] and result['academyLessons'] == 7
+          assert result['tabs'] == ['Inicio', 'Buscar', 'Academy', 'Perfil']
+          assert result['accountForms'] == ['login', 'signup', 'recovery', 'confirmation']
+          assert result['editorialPhotoAccessibility'] is True
+          assert result['editorialPhotoSlugs'] == ["spiko-letras-del-tesoro-euro","casa-de-outeiro","prosegur-digital-gold","fotovoltaica-greenpoint","reental-secundario-houston-3"]
+          assert result['editorialVisualReviewCompleted'] is False, 'QA itself cannot claim visual review'
+          assert result['emptyLoginValidation'] and result['passwordInputsMasked']
+          assert result['accountPanelNoteSeparated'] and result['accountPanelNoteGapPixels'] >= 40
+          assert result['credentialsEntered'] is False and result['termsAccepted'] is False
+          assert result['authEndToEndTested'] is False and result['smtpTested'] is False and result['physicalDevice'] is False
+          pathlib.Path('rwadar-android-132-evidence.zip').write_bytes(payload)
+          PY
+          printf '%s  rwadar-android-132-evidence.zip\n' "$EVIDENCE_SHA256" >> SHA256SUMS.txt
+      - name: Create a new draft without replacing any existing release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Any existing tag release or ambiguous API response stops publication.
+          status="$(curl --silent --show-error --proto '=https' --max-time 30 \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            --output existing-release.json --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          test "$status" = 404
+          python3 - <<'PY'
+          import os, pathlib
+          note = f"""RWAdar 1.3.2 · Android (versionCode 16)
+
+          Cada ficha incorpora una imagen editorial del activo con su lugar y los
+          pasos para entender la inversión. Las imágenes son ilustraciones generadas
+          con IA; no son fotografías del activo real. Catálogo revisado el 21/10/2026.
+          Se conservan las cuentas opcionales y el acabado del Perfil.
+          Las capturas del APK exacto se revisaron antes de publicar.
+
+          Catálogo público sin registro obligatorio: 26 plataformas y 49 referencias.
+          Cuentas gratuitas y opcionales, compartidas con la web. La confirmación y
+          recuperación por correo se abren en la web; después vuelve a entrar en la app.
+          Sesión solo en memoria. Favoritos y Academy permanecen en el dispositivo.
+          Publicidad, cobros y avisos push siguen desactivados.
+
+          SHA-256 del APK: {os.environ['APK_SHA256']}
+          Certificado SHA-256: {os.environ['CERT_SHA256']}
+          Tamaño: {os.environ['APK_BYTES']} bytes.
+          Verificación del APK exacto en emulador Android API35:
+          https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['QA_RUN_ID']}
+
+          Alcance: instalación, arranque, catálogo, navegación, favorito local persistente
+          y formularios de cuentas sin credenciales, con cinco fotos editoriales muestreadas.
+          Este smoke NO prueba creación/inicio
+          de sesión real, SMTP, recuperación efectiva ni un dispositivo físico.
+          """
+          pathlib.Path('release-notes.txt').write_text(note, encoding='utf-8')
+          PY
+          gh release create "$RELEASE_TAG" RWAdar.apk SHA256SUMS.txt rwadar-android-132-evidence.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$QA_HEAD_SHA" \
+            --title 'RWAdar 1.3.2 · Android' --notes-file release-notes.txt --draft --latest=false
+      - name: Verify the uploaded draft assets before making them public
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets > draft-metadata.json
+          python3 - <<'PY'
+          import json, os, pathlib
+          release = json.loads(pathlib.Path('draft-metadata.json').read_text())
+          assert release['tagName'] == 'v1.3.2' and release['isDraft'] is True
+          assert release['isPrerelease'] is False
+          assets = {asset['name']: asset for asset in release['assets']}
+          assert set(assets) == {'RWAdar.apk', 'SHA256SUMS.txt', 'rwadar-android-132-evidence.zip'}
+          assert assets['RWAdar.apk']['size'] == int(os.environ['APK_BYTES'])
+          assert assets['rwadar-android-132-evidence.zip']['size'] == int(os.environ['EVIDENCE_BYTES'])
+          PY
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir release-readback --pattern RWAdar.apk --pattern SHA256SUMS.txt --pattern rwadar-android-132-evidence.zip
+          test "$(stat -c '%s' release-readback/RWAdar.apk)" = "$APK_BYTES"
+          printf '%s  release-readback/RWAdar.apk\n' "$APK_SHA256" | sha256sum --check
+          cmp SHA256SUMS.txt release-readback/SHA256SUMS.txt
+          test "$(stat -c '%s' release-readback/rwadar-android-132-evidence.zip)" = "$EVIDENCE_BYTES"
+          printf '%s  release-readback/rwadar-android-132-evidence.zip\n' "$EVIDENCE_SHA256" | sha256sum --check
+          # From this line onward publication is the explicit authorised action.
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest=true
+      - name: Verify anonymous public release and permanent download links
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --proto '=https' --max-time 30 --retry 3 \
+            --header 'Accept: application/vnd.github+json' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/latest" -o public-release.json
+          python3 - <<'PY'
+          import json, os, pathlib
+          release = json.loads(pathlib.Path('public-release.json').read_text())
+          assert release['tag_name'] == 'v1.3.2' and not release['draft'] and not release['prerelease']
+          assets = {asset['name']: asset for asset in release['assets']}
+          assert set(assets) == {'RWAdar.apk', 'SHA256SUMS.txt', 'rwadar-android-132-evidence.zip'}
+          assert assets['RWAdar.apk']['size'] == int(os.environ['APK_BYTES'])
+          assert assets['rwadar-android-132-evidence.zip']['size'] == int(os.environ['EVIDENCE_BYTES'])
+          PY
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/RWAdar.apk" -o public-readback.apk
+          test "$(stat -c '%s' public-readback.apk)" = "$APK_BYTES"
+          printf '%s  public-readback.apk\n' "$APK_SHA256" | sha256sum --check
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 120 --retry 2 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG/rwadar-android-132-evidence.zip" -o public-evidence.zip
+          test "$(stat -c '%s' public-evidence.zip)" = "$EVIDENCE_BYTES"
+          printf '%s  public-evidence.zip\n' "$EVIDENCE_SHA256" | sha256sum --check
+          printf 'Public verified release: https://github.com/%s/releases/tag/%s\n' "$GITHUB_REPOSITORY" "$RELEASE_TAG"
