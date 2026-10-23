@@ -1,24 +1,23 @@
-# LOCAL TEMPLATE ONLY: copy this file to .github/workflows/android-smoke-140.yml
-# in the PUBLIC victorJorques/RWAdar-downloads repository after review.
+# Scoped QA; success never authorizes release or authenticated catalog approval.
+# Reach each exact native result card before inspecting its documentary labels.
+# Activated guest-only QA at the existing android-smoke-140.yml workflow path.
+# Public victorJorques/RWAdar-downloads; identity and scope reviewed on 23 October.
 # Never copy private application source, environment files or signing keys.
 # This public APK's identity is fixed below. Unknown/mismatched builds fail closed.
 # QA ONLY: this workflow has no release job or contents write permission.
 # A separate android-release-140.yml requires a completed QA run and explicit
 # confirmation that its own screenshots and exact evidence have been reviewed.
-name: RWAdar 1.4.0 - Android emulator QA only
-run-name: RWAdar 1.4.0 APK18 native QA
+name: RWAdar APK19 - anonymous access QA only
+run-name: RWAdar APK19 anonymous-only; authenticated QA pending
 on:
-  push:
-    branches: [codex/android-140-release]
-    paths: [.github/workflows/android-smoke-140.yml]
   workflow_dispatch:
     inputs:
       apk_url:
-        description: Exact anonymous EAS APK18 URL (HTTPS)
+        description: Exact anonymous EAS APK19 URL (HTTPS)
         required: true
         type: string
       apk_sha256:
-        description: Exact SHA256 of the APK 1.4.0 code18
+        description: Exact SHA256 of the APK 1.4.0 code19
         required: true
         type: string
       apk_bytes:
@@ -27,18 +26,18 @@ on:
         type: string
 permissions:
   contents: read
-  actions: read
 concurrency:
-  group: rwadar-apk18-release
+  group: rwadar-apk19-anonymous-qa
   cancel-in-progress: false
 env:
   # Exact metadata of the final EAS APK verified locally by the coordinating agent.
-  # If a retry increments the versionCode, stop: this workflow requires code18.
-  APK_URL: ${{ inputs.apk_url || 'https://expo.dev/artifacts/eas/vQ3yu7AcMwvWC5mcgxkYIlj_J7XmcOF-rh-ZHiiDM8I.apk' }}
-  APK_SHA256: ${{ inputs.apk_sha256 || '350276ec8ed734801d86f5c739596e0e16bea4c6757a97b69b2737a67a7ce3d9' }}
-  APK_BYTES: ${{ inputs.apk_bytes || '88898873' }}
-  SOURCE_HEAD_SHA: '3af20333d042cbd9b8981fbe9613d909b7be3f99'
-  EAS_BUILD_ID: '47bdced4-0217-4b83-8642-24f20b476d74'
+  # If a retry increments the versionCode, stop: this workflow requires code19.
+  APK_URL: ${{ inputs.apk_url || 'https://expo.dev/artifacts/eas/ps1t8bkceKeqVg-GqL4xlO_WOE82UljB9HIfikVxRzw.apk' }}
+  APK_SHA256: ${{ inputs.apk_sha256 || '' }}
+  APK_BYTES: ${{ inputs.apk_bytes || '' }}
+  SOURCE_HEAD_SHA: 1ecf7e7aa8941400d6ad954680cd6deb89107c42
+  EAS_BUILD_ID: 215e184c-2856-408f-9323-ed285f41b3ed
+  EXPECTED_VERSION_CODE: '19'
   EXPECTED_COUNTS: '{"plataformas":26,"principales":24,"secundario":21,"en_camino":4}'
   ORIENTATION_POLICY: 'portrait'
   LONG_TITLE_QUERY: Pottendorfer
@@ -46,16 +45,13 @@ env:
   PUBLICAR_RELEASE: 'NO'
   CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
   RELEASE_TAG: v1.4.0
-  # Resume only uncompleted phases; the fixed failed QA remains a failed run.
-  BASELINE_ZIP: baseline-qa6.zip
-  BASELINE_METADATA: baseline-qa6-metadata.json
 jobs:
   android:
-    # PREPARED ONLY. Set to true only after pinning the reviewed APK identity.
-    if: ${{ false }}
+    # Reviewed identity pinned below; guest-only QA, with no release job.
+    if: ${{ true }}
     # Standard public-repository runner, not a paid larger runner.
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 8
     outputs:
       apk_url: ${{ steps.identity.outputs.apk_url }}
       apk_sha256: ${{ steps.identity.outputs.apk_sha256 }}
@@ -81,13 +77,18 @@ jobs:
           test "$GITHUB_REPOSITORY" = victorJorques/RWAdar-downloads
           test "$GITHUB_REF" = refs/heads/codex/android-140-release
           test "$PUBLICAR_RELEASE" = NO
+          test "$EXPECTED_VERSION_CODE" = 19
+          test "$APK_SHA256" = f384a20017e09a4bc0650a0be82231b29acf6abd9629e1075442d458bd277624
+          test "$APK_BYTES" = 88961445
+          [[ "$APK_SHA256" != 350276ec8ed734801d86f5c739596e0e16bea4c6757a97b69b2737a67a7ce3d9 ]]
           [[ "$SOURCE_HEAD_SHA" =~ ^[a-f0-9]{40}$ ]]
           [[ "$EAS_BUILD_ID" =~ ^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$ ]]
           [[ "$APK_SHA256" != 998d0aed3b183b8f045c36e2772421da806e0e0996e5513de8549ccc13f3fdf9 ]]
           [[ "$APK_SHA256" != 6b137a5adcbcb0a9c4ced483846d612cef3f04fd5bb0865fa5ce36483a630d55 ]]
           mkdir -p evidence
-          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
-          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          test "$APK_URL" = https://expo.dev/artifacts/eas/ps1t8bkceKeqVg-GqL4xlO_WOE82UljB9HIfikVxRzw.apk
+          test "$APK_SHA256" = f384a20017e09a4bc0650a0be82231b29acf6abd9629e1075442d458bd277624
+          test "$APK_BYTES" = 88961445
           [[ "$APK_SHA256" != 593099b7c23d420da0aa361d74d4760b6e73368089849a57887489e7cfb1a255 ]]
           [[ "$APK_SHA256" != 816f07a6d8563ebfb601be6810b564e6ebaeb49f865226ce2112f7635032884b ]]
           [[ "$APK_BYTES" =~ ^[1-9][0-9]{6,8}$ ]]
@@ -97,8 +98,9 @@ jobs:
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > evidence/signature.txt
           test "$(grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:' evidence/signature.txt)" = 1
           grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" evidence/signature.txt
+          grep -Fx 'Verified using v2 scheme (APK Signature Scheme v2): true' evidence/signature.txt
           "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > evidence/package.txt
-          grep -F "package: name='com.rwadar.app' versionCode='18' versionName='1.4.0'" evidence/package.txt
+          grep -F "package: name='com.rwadar.app' versionCode='$EXPECTED_VERSION_CODE' versionName='1.4.0'" evidence/package.txt
           grep -Fx "sdkVersion:'24'" evidence/package.txt
           grep -Fx "targetSdkVersion:'36'" evidence/package.txt
           test "$(grep -c '^uses-permission:' evidence/package.txt)" = 4
@@ -122,45 +124,6 @@ jobs:
           assert len(permissions) == 4 and set(permissions) == expected, 'Unexpected or duplicate manifest permissions'
           PY
           printf 'apk_url=%s\napk_sha256=%s\napk_bytes=%s\npublicar_release=%s\n' "$APK_URL" "$APK_SHA256" "$APK_BYTES" "$PUBLICAR_RELEASE" >> "$GITHUB_OUTPUT"
-      - name: Recover and verify already completed phases of the SAME APK
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/39812931682/attempts/1" > baseline-run.json
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/39812931682/attempts/1/jobs?per_page=100" > baseline-jobs.json
-          python3 - <<'PY'
-          import json, pathlib
-          run = json.loads(pathlib.Path('baseline-run.json').read_text())
-          jobs = json.loads(pathlib.Path('baseline-jobs.json').read_text())['jobs']
-          job, = [j for j in jobs if j['id'] == 119943744862]
-          assert run['id'] == 39812931682 and run['run_attempt'] == 1
-          assert run['head_sha'] == job['head_sha'] == '40f926f8ff4eeb3c99293b16a9c9a5dad9740c69'
-          assert run['status'] == job['status'] == 'completed'
-          assert run['conclusion'] == job['conclusion'] == 'failure'
-          assert job['run_id'] == run['id'] and job['name'] == 'android'
-          assert run['repository']['full_name'] == 'victorJorques/RWAdar-downloads'
-          assert run['path'] == '.github/workflows/android-smoke-140.yml'
-          pathlib.Path('baseline-qa6-metadata.json').write_text(json.dumps({'run':run,'job':job}))
-          PY
-          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/119943744862/logs" > baseline-job.log
-          python3 - <<'PY'
-          import base64, hashlib, pathlib, re
-          log = pathlib.Path('baseline-job.log').read_text(encoding='utf-8').replace('\ufeff', '')
-          assert len(log.encode()) <= 128 * 1024 * 1024
-          prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
-          meta = re.findall(prefix + r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)$', log, re.M)
-          chunks = re.findall(prefix + r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)$', log, re.M)
-          assert meta == [('497e69dae6ca957347e5f3887072e5c2374d9ad31063448d3b889732394a982a','26986584','35139')]
-          assert len(re.findall(prefix + r'RWADAR_QA_ZIP_END$', log, re.M)) == 1
-          assert [int(i) for i, _ in chunks] == list(range(35139))
-          payload = base64.b64decode(''.join(chunk for _, chunk in chunks), validate=True)
-          assert len(payload) == 26986584
-          assert hashlib.sha256(payload).hexdigest() == meta[0][0]
-          pathlib.Path('baseline-qa6.zip').write_bytes(payload)
-          PY
-          python3 .github/pruebas-android/android-baseline-140.py --zip "$BASELINE_ZIP" --metadata "$BASELINE_METADATA" --output evidence
       - name: Prepare official Android emulator on an ephemeral runner
         shell: bash
         run: |
@@ -177,14 +140,14 @@ jobs:
             sudo setfacl -m "u:$(id -un):rw" /dev/kvm
           fi
           # Uses the runner's existing accepted SDK licences. Never auto-accept new terms.
-          timeout 300 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
+          timeout 180 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;default;x86_64' < /dev/null
           command -v adb
           printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar_smoke -k 'system-images;android-35;default;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar_smoke.avd"
           "$ANDROID_HOME/emulator/emulator" -list-avds | tee evidence/avds.txt
           grep -Fx 'rwadar_smoke' evidence/avds.txt
           "$ANDROID_HOME/emulator/emulator" -avd rwadar_smoke -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 2048 > evidence/emulator.log 2>&1 &
-          timeout 180 adb wait-for-device
-          timeout 180 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          timeout 90 adb wait-for-device
+          timeout 90 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
           adb shell input keyevent KEYCODE_WAKEUP
           adb shell wm dismiss-keyguard
           adb shell settings put global window_animation_scale 0
@@ -272,11 +235,11 @@ jobs:
           keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
           "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
           adb install --no-streaming ui-helper/test.apk
-      - name: Verify public catalog, local favorite and optional account forms without credentials
+      - name: Verify anonymous forms only; authenticated catalog QA pending
         shell: bash
         run: |
           set -euo pipefail
-          python3 .github/pruebas-android/android-suite-140.py
+          python3 .github/pruebas-android/android-anonymous-140.py
       - name: Capture final emulator state and stop the disposable device
         if: always()
         shell: bash
@@ -298,8 +261,8 @@ jobs:
           import base64, hashlib, io, json, os, pathlib, re, zipfile
           folder = pathlib.Path('evidence')
           assert folder.is_dir(), 'No evidence directory: nothing to publish'
-          limit_zip = 48 * 1024 * 1024
-          limit_total = 64 * 1024 * 1024
+          limit_zip = 16 * 1024 * 1024
+          limit_total = 24 * 1024 * 1024
           total = 0
           contents = []
           for path in sorted(folder.iterdir()):
@@ -325,7 +288,7 @@ jobs:
               'uncompressedBytes':total, 'zipBytes':len(payload),
               'zipLimitBytes':limit_zip, 'uncompressedLimitBytes':limit_total},
               ensure_ascii=False), flush=True)
-          assert 0 < len(payload) <= limit_zip, 'Evidence ZIP exceeds 48 MiB; do not silently truncate'
+          assert 0 < len(payload) <= limit_zip, 'Evidence ZIP exceeds 16 MiB; do not silently truncate'
           digest = hashlib.sha256(payload).hexdigest()
           encoded = base64.b64encode(payload).decode('ascii')
           chunks = [encoded[i:i+1024] for i in range(0, len(encoded), 1024)]
@@ -338,6 +301,6 @@ jobs:
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a', encoding='utf-8') as summary:
               summary.write(f'## Native APK QA evidence\nZIP SHA-256: {digest}\n\nZIP bytes: {len(payload)}.\n')
               summary.write('Evidence is encoded in numbered job-log lines; no upload-artifact or cache storage.\n')
-              if folder.joinpath('result.json').exists():
-                  summary.write('\n```json\n' + folder.joinpath('result.json').read_text() + '\n```\n')
+              if folder.joinpath('anonymous-access-result.json').exists():
+                  summary.write('\n```json\n' + folder.joinpath('anonymous-access-result.json').read_text() + '\n```\n')
           PY
