@@ -1,5 +1,5 @@
 """QA scoped to anonymous access and packaging. Never authorizes release."""
-import hashlib, json, os, pathlib, re, struct, subprocess, time, traceback, zipfile, xml.etree.ElementTree as ET
+import hashlib, json, os, pathlib, re, struct, subprocess, sys, time, traceback, zipfile, xml.etree.ElementTree as ET
 out = pathlib.Path('evidence')
 out.mkdir(exist_ok=True)
 scroll_gestures = []
@@ -266,6 +266,28 @@ def forms(prefix, invalid=False):
             'invalidEmailLocallyChecked': invalid, 'recoveryNotSubmitted': True}
 
 
+def block_form_network():
+    # AOSP ConnectivityService shell: airplane-mode [enable|disable].
+    # https://android.googlesource.com/platform/packages/modules/Connectivity/+/refs/heads/main/service/src/com/android/server/ConnectivityService.java
+    # The system service sends its protected broadcast; the adb shell must not.
+    adb('shell', 'cmd', 'connectivity', 'airplane-mode', 'enable')
+    adb('shell', 'svc', 'wifi', 'disable')
+    adb('shell', 'svc', 'data', 'disable')
+    deadline = time.monotonic() + 15
+    state = {}
+    while True:
+        state = {'airplane': adb('shell', 'cmd', 'connectivity', 'airplane-mode').strip(),
+                 'wifi': adb('shell', 'settings', 'get', 'global', 'wifi_on').strip(),
+                 'mobileData': adb('shell', 'settings', 'get', 'global', 'mobile_data').strip()}
+        connectivity = adb('shell', 'dumpsys', 'connectivity')
+        state['noActiveDefaultNetwork'] = bool(re.search(r'(?m)^\s*Active default network:\s*none\s*$', connectivity))
+        if state == {'airplane': 'enabled', 'wifi': '0', 'mobileData': '0', 'noActiveDefaultNetwork': True}:
+            out.joinpath('network-blocked.json').write_text(json.dumps(state, indent=2), encoding='utf-8')
+            return state
+        assert time.monotonic() < deadline, 'Network not disabled before forms: ' + repr(state)
+        time.sleep(.5)
+
+
 def main():
     assert os.environ['SOURCE_HEAD_SHA'] == EXPECTED_SOURCE
     assert os.environ['EAS_BUILD_ID'] == EXPECTED_EAS
@@ -284,16 +306,13 @@ def main():
                 for k in ('font_scale', 'accelerometer_rotation', 'user_rotation')}
     original['airplane'] = adb('shell', 'settings', 'get', 'global', 'airplane_mode_on').strip()
     original['wifi'] = adb('shell', 'settings', 'get', 'global', 'wifi_on').strip()
+    original['data'] = adb('shell', 'settings', 'get', 'global', 'mobile_data').strip()
     try:
         report['checks']['photos49'] = verify_photos(apk)
         assert "versionCode='19' versionName='1.4.0'" in out.joinpath('package.txt').read_text()
         report['checks']['packageIdentity'] = True
         # Disposable emulator only. Block delivery before entering invalid text.
-        adb('shell', 'settings', 'put', 'global', 'airplane_mode_on', '1')
-        adb('shell', 'am', 'broadcast', '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', 'true')
-        adb('shell', 'svc', 'wifi', 'disable')
-        adb('shell', 'svc', 'data', 'disable')
-        assert adb('shell', 'settings', 'get', 'global', 'airplane_mode_on').strip() == '1'
+        report['checks']['networkBlockedBeforeForms'] = block_form_network()
         adb('logcat', '-c')
         restart()
         report['checks']['standard'] = forms('01-standard', True)
@@ -321,13 +340,32 @@ def main():
         out.joinpath('failure-traceback.txt').write_text(traceback.format_exc(), encoding='utf-8')
         raise
     finally:
-        out.joinpath('anonymous-access-result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
-        adb('shell', 'wm', 'size', 'reset')
+        # Try every restoration; never replace the original test traceback.
+        original_error_active = sys.exc_info()[0] is not None
+        cleanup_errors = []
+        commands = [('shell', 'wm', 'size', 'reset')]
         for key, default in [('font_scale', '1.0'), ('accelerometer_rotation', '1'), ('user_rotation', '0')]:
-            adb('shell', 'settings', 'put', 'system', key, original[key] if original[key] not in ('', 'null') else default)
-        adb('shell', 'settings', 'put', 'global', 'airplane_mode_on', original['airplane'] if original['airplane'] in ('0', '1') else '0')
-        adb('shell', 'am', 'broadcast', '-a', 'android.intent.action.AIRPLANE_MODE', '--ez', 'state', str(original['airplane'] == '1').lower())
-        adb('shell', 'svc', 'wifi', 'enable' if original['wifi'] == '1' else 'disable')
+            commands.append(('shell', 'settings', 'put', 'system', key, original[key] if original[key] not in ('', 'null') else default))
+        commands.extend([
+            ('shell', 'cmd', 'connectivity', 'airplane-mode', 'enable' if original['airplane'] == '1' else 'disable'),
+            ('shell', 'svc', 'wifi', 'enable' if original['wifi'] == '1' else 'disable'),
+            ('shell', 'svc', 'data', 'enable' if original['data'] == '1' else 'disable'),
+        ])
+        for command in commands:
+            try:
+                adb(*command)
+            except Exception as error:
+                cleanup_errors.append(' '.join(command) + ': ' + str(error))
+        if cleanup_errors:
+            report['cleanupErrors'] = cleanup_errors
+            if not original_error_active:
+                report['status'] = 'failed-cleanup'
+        try:
+            out.joinpath('anonymous-access-result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception as error:
+            cleanup_errors.append('Writing result: ' + str(error))
+        if cleanup_errors and not original_error_active:
+            raise AssertionError('QA cleanup failed: ' + '; '.join(cleanup_errors))
 
 
 if __name__ == '__main__':
