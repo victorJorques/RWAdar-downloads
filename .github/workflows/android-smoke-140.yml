@@ -26,6 +26,7 @@ on:
         type: string
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: rwadar-apk19-anonymous-qa
   cancel-in-progress: false
@@ -45,6 +46,10 @@ env:
   PUBLICAR_RELEASE: 'NO'
   CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
   RELEASE_TAG: v1.4.0
+  BASELINE_GUEST_RUN: guest-baseline-run.json
+  BASELINE_GUEST_JOB: guest-baseline-job.json
+  BASELINE_GUEST_LOG: guest-baseline.log
+  BASELINE_GUEST_ZIP: guest-baseline.zip
 jobs:
   android:
     # Reviewed identity pinned below; guest-only QA, with no release job.
@@ -69,7 +74,17 @@ jobs:
           repository: victorJorques/RWAdar-downloads
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Download the exact public APK and verify identity
+      - name: Load exact prior evidence and accredit only already completed phases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api repos/victorJorques/RWAdar-downloads/actions/runs/40023081613/attempts/1 > "$BASELINE_GUEST_RUN"
+          gh api repos/victorJorques/RWAdar-downloads/actions/jobs/120652334625 > "$BASELINE_GUEST_JOB"
+          gh run view 40023081613 --attempt 1 --job 120652334625 --log --repo victorJorques/RWAdar-downloads > "$BASELINE_GUEST_LOG"
+          python3 .github/pruebas-android/android-anonymous-140.py --prepare-baseline
+      - name: Download the same APK; reuse proven signature and package checks
         id: identity
         shell: bash
         run: |
@@ -95,34 +110,8 @@ jobs:
           curl --fail --location --proto '=https' --proto-redir '=https' --max-time 180 --retry 2 "$APK_URL" -o rwadar.apk
           test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
           printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs rwadar.apk > evidence/signature.txt
-          test "$(grep -Ec '^Signer #[0-9]+ certificate SHA-256 digest:' evidence/signature.txt)" = 1
-          grep -Fx "Signer #1 certificate SHA-256 digest: $CERT_SHA256" evidence/signature.txt
-          grep -Fx 'Verified using v2 scheme (APK Signature Scheme v2): true' evidence/signature.txt
-          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump badging rwadar.apk > evidence/package.txt
-          grep -F "package: name='com.rwadar.app' versionCode='$EXPECTED_VERSION_CODE' versionName='1.4.0'" evidence/package.txt
-          grep -Fx "sdkVersion:'24'" evidence/package.txt
-          grep -Fx "targetSdkVersion:'36'" evidence/package.txt
-          test "$(grep -c '^uses-permission:' evidence/package.txt)" = 4
-          if grep -q '^uses-permission-sdk-' evidence/package.txt; then exit 1; fi
-          grep '^uses-permission:' evidence/package.txt | grep -Ev "name='(android.permission.(INTERNET|ACCESS_NETWORK_STATE|VIBRATE)|com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION)'" > evidence/unexpected-permissions.txt || true
-          test ! -s evidence/unexpected-permissions.txt
-          if grep -Eq "uses-permission:.*(SYSTEM_ALERT_WINDOW|RECEIVE_BOOT_COMPLETED|USE_BIOMETRIC|USE_FINGERPRINT|POST_NOTIFICATIONS|RECORD_AUDIO|READ_EXTERNAL_STORAGE|WRITE_EXTERNAL_STORAGE)" evidence/package.txt; then
-            exit 1
-          fi
-          "$ANDROID_HOME/build-tools/36.0.0/aapt" dump xmltree rwadar.apk AndroidManifest.xml > evidence/manifest.txt
-          python3 - <<'PY'
-          import pathlib, re
-          manifest = pathlib.Path('evidence/manifest.txt').read_text(encoding='utf-8')
-          assert re.search(r'android:allowBackup\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Backup must remain disabled'
-          assert re.search(r'expo\.modules\.updates\.ENABLED[\s\S]{0,240}android:value\([^)]*\)=\(type 0x12\)0x0\b', manifest), 'Expo OTA must remain disabled'
-          assert not re.search(r'android:(debuggable|usesCleartextTraffic)\([^)]*\)=\(type 0x12\)0xffffffff\b', manifest), 'No debug or cleartext-enabled APK'
-          badging = pathlib.Path('evidence/package.txt').read_text(encoding='utf-8')
-          permissions = re.findall(r"^uses-permission(?:-sdk-\d+)?: name='([^']+)'", badging, re.MULTILINE)
-          expected = {'android.permission.INTERNET', 'android.permission.ACCESS_NETWORK_STATE',
-                      'android.permission.VIBRATE', 'com.rwadar.app.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION'}
-          assert len(permissions) == 4 and set(permissions) == expected, 'Unexpected or duplicate manifest permissions'
-          PY
+          # Exact SHA/bytes match the pinned prior run. Its signature, SDK, permissions
+          # and photos are validated from that immutable evidence, without repeating them.
           printf 'apk_url=%s\napk_sha256=%s\napk_bytes=%s\npublicar_release=%s\n' "$APK_URL" "$APK_SHA256" "$APK_BYTES" "$PUBLICAR_RELEASE" >> "$GITHUB_OUTPUT"
       - name: Prepare official Android emulator on an ephemeral runner
         shell: bash
@@ -235,7 +224,7 @@ jobs:
           keytool -genkeypair -keystore ui-helper/ephemeral.jks -storepass android -keypass android -alias test -dname 'CN=Disposable CI test only' -keyalg RSA -validity 1 -noprompt
           "$BUILD_TOOLS/apksigner" sign --ks ui-helper/ephemeral.jks --ks-pass pass:android --key-pass pass:android --out ui-helper/test.apk ui-helper/aligned.apk
           adb install --no-streaming ui-helper/test.apk
-      - name: Verify anonymous forms only; authenticated catalog QA pending
+      - name: Continue font1.5 and rotation only; authenticated catalog QA pending
         shell: bash
         run: |
           set -euo pipefail

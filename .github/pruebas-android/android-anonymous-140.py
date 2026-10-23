@@ -1,5 +1,5 @@
 """QA scoped to anonymous access and packaging. Never authorizes release."""
-import hashlib, json, os, pathlib, re, struct, subprocess, sys, time, traceback, zipfile, xml.etree.ElementTree as ET
+import base64, hashlib, io, json, os, pathlib, re, struct, subprocess, sys, time, traceback, zipfile, xml.etree.ElementTree as ET
 out = pathlib.Path('evidence')
 out.mkdir(exist_ok=True)
 scroll_gestures = []
@@ -234,6 +234,9 @@ def forms(prefix, invalid=False):
         reachable(label)
     screen(prefix + '-entrar', dump())
     click('Crear una cuenta gratis')
+    # Changing the form preserves the ScrollView offset. Bring its heading back
+    # into view before requiring visibility, particularly on font1.5/900x1600.
+    scroll_top()
     wait_ui('Crea tu cuenta', timeout=20)
     for label in ('Correo', 'Contraseña · mínimo 12 caracteres', 'Acepto las condiciones y he leído la privacidad', 'Crear cuenta', 'Volver a entrar'):
         reachable(label)
@@ -288,6 +291,83 @@ def block_form_network():
         time.sleep(.5)
 
 
+def load_guest_baseline():
+    """Accredit only the exact prior APK19 evidence, retaining its failed status."""
+    baseline_run = 40023081613
+    baseline_job = 120652334625
+    head = '7a9db834a040c605df1de44f220620178fd0ffcf'
+    zip_sha = 'c3fac4990bdbccab570b1a12049d48b4e1cdbe96cd34fe071a83a4904627f80d'
+    report_sha = '842b1960939bb78ee297c00478f676d8657385a5bc6f0265d2397e619738ca59'
+    run = json.loads(pathlib.Path(os.environ['BASELINE_GUEST_RUN']).read_text(encoding='utf-8-sig'))
+    job = json.loads(pathlib.Path(os.environ['BASELINE_GUEST_JOB']).read_text(encoding='utf-8-sig'))
+    assert run['id'] == baseline_run and run['run_attempt'] == 1 and run['head_sha'] == head
+    assert run['repository']['full_name'] == 'victorJorques/RWAdar-downloads'
+    assert run['path'] == '.github/workflows/android-smoke-140.yml'
+    assert run['status'] == 'completed' and run['conclusion'] == 'failure'
+    assert job['id'] == baseline_job and job['run_id'] == baseline_run and job['head_sha'] == head
+    assert job['status'] == 'completed' and job['conclusion'] == 'failure'
+    assert any(s['name'] == 'Download the exact public APK and verify identity' and s['conclusion'] == 'success' for s in job['steps'])
+    target = pathlib.Path(os.environ['BASELINE_GUEST_ZIP'])
+    if target.exists():
+        payload = target.read_bytes()
+    else:
+        log_path = pathlib.Path(os.environ['BASELINE_GUEST_LOG'])
+        assert log_path.stat().st_size <= 4*1024*1024
+        text = log_path.read_text(encoding='utf-8-sig')
+        markers = re.findall(r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)\s*$', text, re.M)
+        assert len(markers) == 1 and markers[0][:2] == (zip_sha, '1085225')
+        chunks = re.findall(r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)\s*$', text, re.M)
+        assert len(chunks) == int(markers[0][2]) and [int(i) for i, _ in chunks] == list(range(len(chunks)))
+        payload = base64.b64decode(''.join(s for _, s in chunks), validate=True)
+    assert len(payload) == 1085225 and hashlib.sha256(payload).hexdigest() == zip_sha
+    archive = zipfile.ZipFile(io.BytesIO(payload))
+    entries = archive.infolist()
+    assert len(entries) == len({e.filename for e in entries}) == 28
+    assert sum(e.file_size for e in entries) <= 24*1024*1024 and archive.testzip() is None
+    for e in entries:
+        assert re.fullmatch(r'evidence/[A-Za-z0-9_.-]+', e.filename) and e.file_size <= 4*1024*1024
+        assert (e.external_attr >> 16) & 0o170000 != 0o120000
+    raw_report = archive.read('evidence/anonymous-access-result.json')
+    assert hashlib.sha256(raw_report).hexdigest() == report_sha
+    report = json.loads(raw_report)
+    assert report['status'] == 'failed' and report['failure'] == 'Native UI did not visibly show: Crea tu cuenta'
+    assert report['apkSha256'] == EXPECTED_APK_SHA256 and report['apkBytes'] == EXPECTED_APK_BYTES
+    assert report['sourceHeadSha'] == EXPECTED_SOURCE and report['easBuildId'] == EXPECTED_EAS
+    assert report['version'] == '1.4.0' and report['versionCode'] == 19
+    assert report['full20PointQA'] is False and report['releaseApproved'] is False
+    checks = report['checks']
+    assert checks['packageIdentity'] is True
+    assert checks['standard'] == {'controlsReachable': True, 'catalogAbsent': True, 'signup12CharacterLabel': True,
+                                  'invalidEmailLocallyChecked': True, 'recoveryNotSubmitted': True}
+    assert {(p['slug'], p['sha256'], p['bytes']) for p in checks['photos49']} == {
+        (p['slug'], p['hashSha256'], p['bytes']) for p in PHOTOS}
+    assert len(checks['photos49']) == 49
+    # Real XML and screenshots must exist for each accredited standard phase.
+    for suffix in ('entrar', 'alta', 'error-local', 'recuperar-sin-envio'):
+        assert archive.read('evidence/01-standard-' + suffix + '.png').startswith(b'\x89PNG\r\n\x1a\n')
+        denied(ET.fromstring(archive.read('evidence/01-standard-' + suffix + '.xml')))
+    assert 'Crea tu cuenta' in visible_text(ET.fromstring(archive.read('evidence/01-standard-alta.xml')))
+    assert 'Escribe un correo válido.' in visible_text(ET.fromstring(archive.read('evidence/01-standard-error-local.xml')))
+    inventory = []
+    for e in entries:
+        data = archive.read(e)
+        name = 'baseline-' + pathlib.PurePosixPath(e.filename).name
+        destination = out / name
+        if destination.exists():
+            assert destination.read_bytes() == data, 'Existing baseline evidence differs'
+        else:
+            destination.write_bytes(data)
+        inventory.append({'file': name, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+    provenance = {'runId': baseline_run, 'jobId': baseline_job, 'headSha': head, 'attempt': 1,
+                  'zipSha256': zip_sha, 'zipBytes': len(payload), 'reportSha256': report_sha,
+                  'historicalStatus': report['status'], 'historicalFailure': report['failure'],
+                  'reusedChecks': ['photos49', 'packageIdentity', 'standard'], 'files': inventory}
+    out.joinpath('guest-baseline-provenance.json').write_text(json.dumps(provenance, indent=2), encoding='utf-8')
+    if not target.exists():
+        target.write_bytes(payload)
+    return checks, provenance
+
+
 def main():
     assert os.environ['SOURCE_HEAD_SHA'] == EXPECTED_SOURCE
     assert os.environ['EAS_BUILD_ID'] == EXPECTED_EAS
@@ -297,25 +377,25 @@ def main():
     assert apk.stat().st_size == int(os.environ['APK_BYTES'])
     with apk.open('rb') as stream:
         assert hashlib.file_digest(stream, 'sha256').hexdigest() == os.environ['APK_SHA256']
+    baseline_checks, baseline_provenance = load_guest_baseline()
     report = {'scope': 'anonymous-access-and-package-only', 'sourceHeadSha': EXPECTED_SOURCE,
               'easBuildId': EXPECTED_EAS, 'apkSha256': os.environ['APK_SHA256'], 'apkBytes': apk.stat().st_size,
               'version': '1.4.0', 'versionCode': 19, 'status': 'failed', 'checks': {},
               'authenticatedCatalogQA': 'pending-real-confirmed-account', 'full20PointQA': False,
               'releaseApproved': False, 'formNetwork': 'blocked-airplane-mode'}
+    report['baselineProvenance'] = baseline_provenance
+    report['checks'] = {key: baseline_checks[key] for key in ('photos49', 'packageIdentity', 'standard')}
+    report['checkProvenance'] = {key: {'origin': 'baseline', 'runId': 40023081613,
+        'reportSha256': baseline_provenance['reportSha256']} for key in report['checks']}
     original = {k: adb('shell', 'settings', 'get', 'system', k).strip()
                 for k in ('font_scale', 'accelerometer_rotation', 'user_rotation')}
     original['airplane'] = adb('shell', 'settings', 'get', 'global', 'airplane_mode_on').strip()
     original['wifi'] = adb('shell', 'settings', 'get', 'global', 'wifi_on').strip()
     original['data'] = adb('shell', 'settings', 'get', 'global', 'mobile_data').strip()
     try:
-        report['checks']['photos49'] = verify_photos(apk)
-        assert "versionCode='19' versionName='1.4.0'" in out.joinpath('package.txt').read_text()
-        report['checks']['packageIdentity'] = True
         # Disposable emulator only. Block delivery before entering invalid text.
         report['checks']['networkBlockedBeforeForms'] = block_form_network()
         adb('logcat', '-c')
-        restart()
-        report['checks']['standard'] = forms('01-standard', True)
         adb('shell', 'settings', 'put', 'system', 'font_scale', '1.5')
         adb('shell', 'wm', 'size', '900x1600')
         restart()
@@ -369,4 +449,8 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if sys.argv[1:] == ['--prepare-baseline']:
+        load_guest_baseline()
+    else:
+        assert not sys.argv[1:], 'Unknown arguments'
+        main()
