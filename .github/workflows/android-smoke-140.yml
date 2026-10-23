@@ -1,4 +1,3 @@
-# Reach each exact native result card before inspecting its documentary labels.
 # LOCAL TEMPLATE ONLY: copy this file to .github/workflows/android-smoke-140.yml
 # in the PUBLIC victorJorques/RWAdar-downloads repository after review.
 # Never copy private application source, environment files or signing keys.
@@ -28,6 +27,7 @@ on:
         type: string
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: rwadar-apk18-release
   cancel-in-progress: false
@@ -46,6 +46,9 @@ env:
   PUBLICAR_RELEASE: 'NO'
   CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
   RELEASE_TAG: v1.4.0
+  # Resume only uncompleted phases; the fixed failed QA remains a failed run.
+  BASELINE_ZIP: baseline-qa6.zip
+  BASELINE_METADATA: baseline-qa6-metadata.json
 jobs:
   android:
     # PREPARED ONLY. Set to true only after pinning the reviewed APK identity.
@@ -119,6 +122,45 @@ jobs:
           assert len(permissions) == 4 and set(permissions) == expected, 'Unexpected or duplicate manifest permissions'
           PY
           printf 'apk_url=%s\napk_sha256=%s\napk_bytes=%s\npublicar_release=%s\n' "$APK_URL" "$APK_SHA256" "$APK_BYTES" "$PUBLICAR_RELEASE" >> "$GITHUB_OUTPUT"
+      - name: Recover and verify already completed phases of the SAME APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/39812931682/attempts/1" > baseline-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/39812931682/attempts/1/jobs?per_page=100" > baseline-jobs.json
+          python3 - <<'PY'
+          import json, pathlib
+          run = json.loads(pathlib.Path('baseline-run.json').read_text())
+          jobs = json.loads(pathlib.Path('baseline-jobs.json').read_text())['jobs']
+          job, = [j for j in jobs if j['id'] == 119943744862]
+          assert run['id'] == 39812931682 and run['run_attempt'] == 1
+          assert run['head_sha'] == job['head_sha'] == '40f926f8ff4eeb3c99293b16a9c9a5dad9740c69'
+          assert run['status'] == job['status'] == 'completed'
+          assert run['conclusion'] == job['conclusion'] == 'failure'
+          assert job['run_id'] == run['id'] and job['name'] == 'android'
+          assert run['repository']['full_name'] == 'victorJorques/RWAdar-downloads'
+          assert run['path'] == '.github/workflows/android-smoke-140.yml'
+          pathlib.Path('baseline-qa6-metadata.json').write_text(json.dumps({'run':run,'job':job}))
+          PY
+          gh api --allow-escape-sequences "repos/$GITHUB_REPOSITORY/actions/jobs/119943744862/logs" > baseline-job.log
+          python3 - <<'PY'
+          import base64, hashlib, pathlib, re
+          log = pathlib.Path('baseline-job.log').read_text(encoding='utf-8').replace('\ufeff', '')
+          assert len(log.encode()) <= 128 * 1024 * 1024
+          prefix = r'^(?:\d{4}-\d{2}-\d{2}T[^ ]+ )?'
+          meta = re.findall(prefix + r'RWADAR_QA_ZIP_META ([a-f0-9]{64}) (\d+) (\d+)$', log, re.M)
+          chunks = re.findall(prefix + r'RWADAR_QA_ZIP_DATA (\d{6}) ([A-Za-z0-9+/=]+)$', log, re.M)
+          assert meta == [('497e69dae6ca957347e5f3887072e5c2374d9ad31063448d3b889732394a982a','26986584','35139')]
+          assert len(re.findall(prefix + r'RWADAR_QA_ZIP_END$', log, re.M)) == 1
+          assert [int(i) for i, _ in chunks] == list(range(35139))
+          payload = base64.b64decode(''.join(chunk for _, chunk in chunks), validate=True)
+          assert len(payload) == 26986584
+          assert hashlib.sha256(payload).hexdigest() == meta[0][0]
+          pathlib.Path('baseline-qa6.zip').write_bytes(payload)
+          PY
+          python3 .github/pruebas-android/android-baseline-140.py --zip "$BASELINE_ZIP" --metadata "$BASELINE_METADATA" --output evidence
       - name: Prepare official Android emulator on an ephemeral runner
         shell: bash
         run: |

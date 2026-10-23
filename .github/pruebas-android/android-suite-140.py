@@ -1,4 +1,4 @@
-import json, os, pathlib, re, struct, subprocess, time, xml.etree.ElementTree as ET
+import importlib.util, json, os, pathlib, re, struct, subprocess, time, xml.etree.ElementTree as ET
 
 out = pathlib.Path('evidence')
 expected_counts = json.loads(os.environ['EXPECTED_COUNTS'])
@@ -11,6 +11,17 @@ assert re.fullmatch(r'[a-f0-9-]{36}', os.environ['EAS_BUILD_ID'])
 geometry = []
 traversals = {}
 scroll_gestures = []
+
+# The immutable failed QA6 supplies only its completed phases. Missing/altered
+# provenance fails before any Android action; an omitted environment must never
+# cause an accidental repetition of all 26 centres, photos, groups and fees.
+baseline_module_spec = importlib.util.spec_from_file_location(
+    'rwadar_baseline_140', pathlib.Path(__file__).with_name('android-baseline-140.py'))
+baseline_module = importlib.util.module_from_spec(baseline_module_spec)
+baseline_module_spec.loader.exec_module(baseline_module)
+baseline = baseline_module.load_baseline(out)
+geometry.extend(baseline['geometry'])
+traversals.update(baseline['traversals'])
 
 
 class TransientSnapshotError(Exception):
@@ -242,7 +253,7 @@ def swipe_scroll(forward, root=None):
     adb('shell','input','swipe',str(x),str(start),str(x),str(end),'450')
 
 
-def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to_end=False):
+def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to_end=False, capture_all=False):
     root = wait_ui('Cerrar ' + title)
     remaining = set(required)
     previous_text = None
@@ -255,7 +266,7 @@ def document_detail(prefix, title, required, forbidden=(), inspect=None, scan_to
             inspect(root)
         assert not any(item in text for item in forbidden), 'Commercial claim in documentary detail: ' + text
         newly = {item for item in remaining if item in text}
-        if newly or index == 0:
+        if newly or index == 0 or capture_all:
             screen(prefix + '-%02d' % index, root)
         remaining -= newly
         if not remaining and (not scan_to_end or text == previous_text):
@@ -281,6 +292,7 @@ def search(root, query):
         tap_observed(root, 'Limpiar búsqueda y filtros de ofertas')
         time.sleep(.5)
         root = wait_ui('Ofertas específicas')
+    root = reach_control('Buscar ofertas por nombre, proveedor, país o métrica')
     tap_observed(root, 'Buscar ofertas por nombre, proveedor, país o métrica')
     adb('shell', 'input', 'text', query.replace(' ', '%s'))
     adb('shell', 'input', 'keyevent', 'KEYCODE_BACK')
@@ -301,7 +313,10 @@ def scroll_top():
     previous = None
     for _ in range(12):
         root = dump()
-        current = visible_text(root)
+        # A tall visible paragraph can retain identical text while its native
+        # bounds move through a short viewport. Include observed bounds before
+        # deciding that a swipe has reached a stable edge.
+        current = scroll_position(root)
         if current == previous:
             return
         previous = current
@@ -317,13 +332,18 @@ def reach_control(label, starts=False):
             find_node(root, label, starts=starts)
             return root
         except AssertionError:
-            current = visible_text(root)
+            current = scroll_position(root)
             if current == previous:
                 break
             previous = current
             scroll_down()
     capture_failure('control-not-reached-' + re.sub(r'[^a-z0-9]+','-',label.lower()).strip('-')[:70])
     raise AssertionError('Control not reachable by native scrolling: ' + label)
+
+
+def scroll_position(root):
+    return tuple((node.get('class',''),node.get('bounds',''),node.get('text',''),node.get('content-desc',''))
+                 for node in root.iter('node') if node.get('visible') != 'false')
 
 
 def assert_empty_field(root, label, password=False):
@@ -396,44 +416,11 @@ def open_observed_offer(query, title):
 
 
 def integral_native_checks():
-    groups = [group_roundtrip('Brickwise','principales','18-brickwise'),
-              group_roundtrip('Reental','secundario','19-reental')]
-    open_collection('principales')
+    # All completed phases below are revalidated from immutable XML/PNG/native
+    # evidence by android-baseline-140.py, never synthesized as new observations.
+    groups = baseline['integralUi']['groups']
+    costs = baseline['integralUi']['costs']
     title = os.environ['LONG_TITLE']
-    root = open_observed_offer(os.environ['LONG_TITLE_QUERY'],title)
-    assert_modal_top(root,title,'20-titulo-largo-completo')
-    adb('shell','input','keyevent','KEYCODE_BACK')
-    wait_ui('Ofertas específicas')
-    root = open_observed_offer('Spiko','Spiko Letras del Tesoro Euro')
-    assert_modal_top(root,'Spiko Letras del Tesoro Euro','21-spiko-cabecera')
-    root = document_detail('22-lectura-completa','Spiko Letras del Tesoro Euro',[
-        'EN TRES FRASES','¿QUIÉN PUEDE ACCEDER Y EN QUÉ CONDICIONES?',
-        'Mínimo publicado en euros','Acceso desde España','Cómo recuperar el dinero','Costes publicados',
-        'FECHAS DE ESTA FICHA','Revisión del catálogo:','Última consulta citada:',
-        'Fecha del dato en esa referencia:','REFERENCIAS FECHADAS','No son precios actuales',
-        '¿Puedo perder dinero?','¿Puedo vender cuando quiera?',
-        '¿Quién custodia el activo?','¿Quién supervisa esta oferta?',
-        'Puedes perder dinero. RWAdar no vende ni asesora.','Ver en la fuente'],scan_to_end=True)
-    principal = [n for n in root.iter('node') if n.get('visible') != 'false' and n.get('content-desc','').startswith('Ver en la fuente ·')]
-    assert len(principal) == 1, 'Only one primary source CTA must remain at the end'
-    screen('23-un-solo-destino-principal', root)
-    tap_observed(root,'Cerrar Spiko Letras del Tesoro Euro')
-    wait_ui('Ofertas específicas')
-    costs = []
-    for sample in [('mF-ONE','0,6% anual sobre AUM'),('mGLO','0,40% anual sobre AUM')]:
-        title_cost,management = sample
-        open_collection('principales')
-        # The title fragment mGLO also matches mGLOBAL; its provider disambiguates the observed search.
-        open_observed_offer('mGLO Midas' if title_cost == 'mGLO' else title_cost,title_cost)
-        prefix = '28-costes-' + ('mf-one' if title_cost == 'mF-ONE' else 'mglo')
-        document_detail(prefix,title_cost,['Costes publicados','Comisión de gestión · 22/10/2026',
-            management,'Comisión de éxito · 22/10/2026','0%','Consultado el 22/10/2026'],scan_to_end=True)
-        combined = any(management in text and 'Comisión de éxito' in text and '0%' in text for text in traversals[prefix])
-        assert combined, 'Management and success fees must remain visible together with dated references'
-        costs.append({'title':title_cost,'management':management,'success':'0%','consultedOn':'2026-10-22',
-                      'bothConceptsObserved':True,'valuesWereNotAdded':True})
-        tap_observed(dump(),'Cerrar ' + title_cost)
-        wait_ui('Ofertas específicas')
     prior_font = adb('shell','settings','get','system','font_scale').strip()
     prior_rotate = adb('shell','settings','get','system','accelerometer_rotation').strip()
     prior_user_rotate = adb('shell','settings','get','system','user_rotation').strip()
@@ -488,6 +475,20 @@ def integral_native_checks():
 
 
 def language_checks():
+    # QA6 did not preserve every Spanish viewport. A fresh complete Spanish
+    # traversal is setup for the still-pending exact ES/EN comparison; it is
+    # not a repetition of the already accredited historical detail phase.
+    root = wait_ui('Inicio','Buscar','Perfil')
+    tap_observed(root,'Buscar')
+    wait_ui('Ofertas específicas')
+    open_collection('principales')
+    open_observed_offer('Spiko','Spiko Letras del Tesoro Euro')
+    root = document_detail('39-espanol-cotejo','Spiko Letras del Tesoro Euro',
+        ['FR001400ODL1','REFERENCIAS FECHADAS','Ver en la fuente'],
+        scan_to_end=True,capture_all=True)
+    tap_observed(root,'Cerrar Spiko Letras del Tesoro Euro')
+    root = wait_ui('Ofertas específicas')
+    tap_observed(root,'Perfil')
     scroll_top()
     root = wait_ui('Entra en tu cuenta')
     tap_observed(root,'English')
@@ -519,6 +520,7 @@ def language_checks():
     root = wait_ui('Explore documented information')
     tap_observed(root,'Show offers',starts=True)
     root = wait_ui('Specific offers')
+    root = reach_control('Search offers by name, provider, country or metric')
     tap_observed(root,'Search offers by name, provider, country or metric')
     adb('shell','input','text','Spiko')
     adb('shell','input','keyevent','KEYCODE_BACK')
@@ -551,7 +553,7 @@ def language_checks():
         previous = text
         scroll_down()
     assert not required, 'Missing English/native original-source evidence: ' + ', '.join(sorted(required))
-    spanish_text = '\n'.join(traversals['22-lectura-completa'])
+    spanish_text = '\n'.join(traversals['39-espanol-cotejo'])
     english_text = '\n'.join(english)
     tokens = lambda text:set(re.findall(r'[0-9][0-9.,]*\s*(?:EUR|USD|CHF|GBP|€|%)|(?:EUR|USD|CHF|GBP|€)\s*[0-9][0-9.,]*',text))
     dates = lambda text:set(re.findall(r'\b\d{2}/\d{2}/\d{4}\b|\b\d{4}-\d{2}-\d{2}\b',text))
@@ -560,6 +562,10 @@ def language_checks():
     assert dates(spanish_text) == dates(english_text), 'Language switch must preserve source dates'
     assert urls(spanish_text), 'Need actual source destinations observed in the Spanish native traversal'
     assert urls(spanish_text) == urls(english_text), 'Language switch must preserve the source destinations'
+    out.joinpath('language-native-observed.json').write_text(json.dumps({
+        'scope':'Fresh native ES and EN traversals for the pending exact language comparison',
+        'spanishCapturePrefix':'39-espanol-cotejo','spanish':traversals['39-espanol-cotejo'],
+        'english':english},indent=2,ensure_ascii=False),encoding='utf-8')
     tap_observed(root,'Close ' + title)
     root = wait_ui('Specific offers')
     tap_observed(root,'Español')
@@ -649,61 +655,28 @@ root = wait_ui('Plataformas de tokenización, con la fuente al lado', 'Noticias 
 for tab in ('Inicio', 'Buscar', 'Academy', 'Perfil'):
     find_node(root, tab)
 screen('01-inicio', root)
-radar_native = radar_center_checks()
-root = dump()
-root = open_platform_radar()
-assert str(expected_counts['plataformas']) + ' plataformas' in visible_text(root), 'Platform count must remain visible'
-screen('02-buscar-empresas', root)
-tap_observed(root, 'Mostrar ofertas', starts=True)
-root = wait_ui('Ofertas específicas', f"{expected_counts['principales']} principales · {expected_counts['secundario']} secundarias · {expected_counts['en_camino']} en camino")
-collections = assert_counts(root)
-assert sum(collections.values()) == sum(expected_counts[k] for k in ('principales','secundario','en_camino'))
-screen('03-buscar-ofertas', root)
+radar_native = baseline['radarNativeCentres']
+collections = baseline['collections']
+editorial_checked = baseline['editorialPhotoSlugs']
+# The continuation uses a fresh installation. Seed a local favorite only as
+# setup for the still-pending persistence check; do not claim prior persistence
+# or repeat the completed photo/card/documentary/radar checks.
+tap_observed(root, 'Buscar')
+root = wait_ui('Ofertas específicas')
+open_collection('principales')
 root = search(root, 'Spiko')
 root = reach_control('Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
-node, _ = find_node(root, 'Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
-label = node.get('content-desc', '')
-out.joinpath('spiko-card.txt').write_text(label, encoding='utf-8')
-# Date-sensitive yields are not hardcoded: the complete public catalog
-# must stay available even when a revision expires.
-assert 'Spiko Letras del Tesoro Euro' in label, label
-for field in ('Mínimo publicado en euros:', 'Acceso desde España:', 'Cómo recuperar el dinero:', 'Fuente consultada'):
-    assert field in label, 'Missing documented card fact: ' + field
-assert 'Sin comprobar desde España' in label, 'QA must not infer Spain admission from geography'
-assert editorial_samples[0]['location'] in label and 'Ilustración editorial' in label, label
-screen('04-spiko-tarjeta', root)
 tap_observed(root, 'Ver ficha de Spiko Letras del Tesoro Euro.', starts=True)
-root = editorial_detail(editorial_samples[0], '04b-editorial-spiko')
-tap_observed(root, 'Guardar Spiko Letras del Tesoro Euro en Perfil')
+root = wait_ui('Cerrar Spiko Letras del Tesoro Euro')
+try:
+    find_node(root, 'Quitar Spiko Letras del Tesoro Euro de guardadas')
+except AssertionError:
+    root = reach_control('Guardar Spiko Letras del Tesoro Euro en Perfil')
+    tap_observed(root, 'Guardar Spiko Letras del Tesoro Euro en Perfil')
 root = wait_ui('Quitar Spiko Letras del Tesoro Euro de guardadas')
-screen('05-favorito-local', root)
-root = document_detail('06-spiko-ficha', 'Spiko Letras del Tesoro Euro',
-                       ['CARACTERÍSTICAS DOCUMENTADAS', 'FR001400ODL1', 'REFERENCIAS FECHADAS', 'FECHAS DE ESTA FICHA'])
+screen('continuacion-favorito-preparado', root)
 tap_observed(root, 'Cerrar Spiko Letras del Tesoro Euro')
-root = wait_ui('Ofertas específicas')
-for index, sample in enumerate(editorial_samples[1:], start=1):
-    scroll_top()
-    root = dump()
-    group_label = 'Mostrar principales ' + str(expected_counts['principales']) if sample['group'] == 'principales' else 'Mostrar reventa ' + str(expected_counts['secundario'])
-    root = reach_control(group_label)
-    tap_observed(root, group_label)
-    root = search(wait_ui('Ofertas específicas'), sample['query'])
-    card_label = 'Ver ficha de ' + sample['title'] + '.'
-    root = reach_control(card_label, starts=True)
-    card, _ = find_node(root, card_label, starts=True)
-    accessible = card.get('content-desc', '')
-    assert sample['location'] in accessible and 'Ilustración editorial' in accessible, accessible
-    prefix = '06b-editorial-%02d' % index
-    screen(prefix + '-tarjeta', root)
-    tap_observed(root, card_label, starts=True)
-    root = editorial_detail(sample, prefix)
-    tap_observed(root, 'Cerrar ' + sample['title'])
-    root = wait_ui('Ofertas específicas')
-assert editorial_checked == [sample['slug'] for sample in editorial_samples]
-out.joinpath('editorial-photos.json').write_text(json.dumps({
-    'samples':editorial_samples, 'checkedSlugs':editorial_checked,
-    'automaticScope':'Exact per-offer alt text and location; screenshots require separate visual review',
-    'visualReviewCompleted':False}, indent=2), encoding='utf-8')
+wait_ui('Ofertas específicas')
 integral = integral_native_checks()
 root = dump()
 tap_observed(root, 'Academy')
@@ -834,7 +807,9 @@ checks20 = [
     ('19','Formularios accesibles sin credenciales ni consentimientos'),
     ('20','Proceso vivo y sin excepciones Android/JavaScript registradas'),
 ]
-checks20 = [{'id':identifier,'point':point,'status':'checked'} for identifier,point in checks20]
+checks20 = [{'id':identifier,'point':point,'status':'checked',
+             'evidenceOrigin':('baseline-39812931682' if identifier in baseline['baselineProvenance']['reusedCheckIds']
+                               else 'current-continuation')} for identifier,point in checks20]
 assert len(checks20) == 20 and len({c['id'] for c in checks20}) == 20
 out.joinpath('native-checks-20.json').write_text(json.dumps({'points':checks20,
     'scope':'Automatic observations on this emulator; screenshots need separate visual review. TalkBack, physical device and real Auth are excluded.'},indent=2),encoding='utf-8')
@@ -847,6 +822,7 @@ result = {'package':'com.rwadar.app', 'version':'1.4.0', 'versionCode':18,
           'tabs':['Inicio', 'Buscar', 'Academy', 'Perfil'],
           'visibleCatalogPlatforms':expected_counts['plataformas'], 'catalogSchemaVersion':2, 'collections':collections,
           'sourceCommit':os.environ['SOURCE_HEAD_SHA'],'easBuildId':os.environ['EAS_BUILD_ID'],
+          'baselineProvenance':baseline['baselineProvenance'],
           'nativeChecks20':checks20,'integralUi':integral,
           'radarNativeCentres':radar_native,
           'languageUi':language,
