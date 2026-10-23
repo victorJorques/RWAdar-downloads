@@ -52,7 +52,7 @@ env:
 jobs:
   android:
     # PREPARED ONLY. Set to true only after pinning the reviewed APK identity.
-    if: ${{ true }}
+    if: ${{ false }}
     # Standard public-repository runner, not a paid larger runner.
     runs-on: ubuntu-24.04
     timeout-minutes: 35
