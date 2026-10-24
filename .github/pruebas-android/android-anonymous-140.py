@@ -108,16 +108,10 @@ def tap_observed(root, label, starts=False):
     return node
 
 
-def scroll_down():
-    swipe_scroll(forward=True)
-    time.sleep(.5)
-
-
-def swipe_scroll(forward, root=None):
-    # Fixed headers differ between Home, Search and translated/font-scaled UI.
-    # Use the actual vertical native viewport, never screen-percentage guesses.
-    root = dump() if root is None else root
-    width, height = display_size()
+def scroll_trajectories(root, dimensions, forward):
+    # Pure geometry: keep the whole vertical path in an observed content margin.
+    # In particular, a swipe starting inside EditText can be consumed by that field.
+    width, height = dimensions
     regions = []
     for node in root.iter('node'):
         if node.get('visible') == 'false' or node.get('class') not in (
@@ -128,48 +122,89 @@ def swipe_scroll(forward, root=None):
             continue
         left, top, right, bottom = bounds
         if 0 <= left < right <= width and 0 <= top < bottom <= height and bottom-top >= 80:
-            regions.append(bounds)
-    assert len(regions) == 1, 'Need one unambiguous visible vertical native scroll viewport: ' + str(regions)
-    left, top, right, bottom = regions[0]
-    x = (left+right)//2
+            regions.append((node, bounds))
+    assert len(regions) == 1, 'Need one unambiguous visible vertical native scroll viewport'
+    viewport, bounds = regions[0]
+    left, top, right, bottom = bounds
     low = top + int((bottom-top)*.16)
     high = top + int((bottom-top)*.84)
     start, end = (high, low) if forward else (low, high)
     assert top < min(start,end) < max(start,end) < bottom, 'Gesture must stay inside the observed viewport'
-    scroll_gestures.append({'display':[width,height], 'bounds':regions[0],
-        'direction':'forward' if forward else 'backward', 'start':[x,start], 'end':[x,end]})
+    excluded = []
+    for node in viewport.iter('node'):
+        if node.get('visible') == 'false' or not (node.get('text') or node.get('content-desc')
+                or node.get('clickable') == 'true' or node.get('class') == 'android.widget.EditText'):
+            continue
+        item = list(map(int, re.findall(r'-?\d+', node.get('bounds', ''))))
+        if len(item) == 4 and item[0] < item[2] and item[1] < item[3] and item[1] < high and item[3] > low:
+            clipped = [max(left,item[0]), max(top,item[1]), min(right,item[2]), min(bottom,item[3])]
+            if clipped[0] < clipped[2] and clipped[1] < clipped[3]:
+                excluded.append(clipped)
+    clearance = max(2, min(16, (right-left)//100))
+    content_left = min((item[0] for item in excluded), default=right)
+    content_right = max((item[2] for item in excluded), default=left)
+    margins = [(left+clearance, content_left-clearance), (content_right+clearance, right-clearance)]
+    trajectories = []
+    for margin_left, margin_right in margins:
+        if margin_right-margin_left < clearance:
+            continue
+        x = (margin_left+margin_right)//2
+        assert left < x < right and all(not (item[0] <= x <= item[2]) for item in excluded)
+        if any(path['start'][0] == x for path in trajectories):
+            continue
+        trajectories.append({'display':[width,height], 'bounds':bounds,
+            'direction':'forward' if forward else 'backward', 'start':[x,start], 'end':[x,end],
+            'freeMargin':[margin_left,low,margin_right,high], 'excludedBounds':excluded})
+    assert trajectories, 'No observed free content margin for a native vertical swipe'
+    return trajectories
+
+
+def swipe_scroll(forward, root, alternative=False):
+    paths = scroll_trajectories(root, display_size(), forward)
+    index = 1 if alternative else 0
+    assert index < len(paths), 'No second distinct observed free margin for a stalled swipe'
+    gesture = paths[index]
+    gesture['attempt'] = 'alternative' if alternative else 'primary'
+    scroll_gestures.append(gesture)
     out.joinpath('native-scroll-gestures.json').write_text(json.dumps(scroll_gestures,indent=2),encoding='utf-8')
-    adb('shell','input','swipe',str(x),str(start),str(x),str(end),'450')
+    adb('shell','input','swipe',str(gesture['start'][0]),str(gesture['start'][1]),
+        str(gesture['end'][0]),str(gesture['end'][1]),'450')
+    return gesture
+
+
+def scroll_step(forward, root):
+    before = scroll_position(root)
+    for alternative in (False, True):
+        gesture = swipe_scroll(forward, root, alternative=alternative)
+        time.sleep(.5)
+        root = dump()
+        gesture['positionChanged'] = scroll_position(root) != before
+        out.joinpath('native-scroll-gestures.json').write_text(json.dumps(scroll_gestures,indent=2),encoding='utf-8')
+        if gesture['positionChanged']:
+            return root, True
+    return root, False
 
 
 def scroll_top():
-    previous = None
+    root = dump()
     for _ in range(12):
-        root = dump()
-        # A tall visible paragraph can retain identical text while its native
-        # bounds move through a short viewport. Include observed bounds before
-        # deciding that a swipe has reached a stable edge.
-        current = scroll_position(root)
-        if current == previous:
+        root, moved = scroll_step(forward=False, root=root)
+        if not moved:
             return
-        previous = current
-        swipe_scroll(forward=False,root=root)
-        time.sleep(.3)
+    capture_failure('scroll-top-not-reached')
+    raise AssertionError('Native scrolling did not reach a stable top edge')
 
 
 def reach_control(label, starts=False):
-    previous = None
+    root = dump()
     for _ in range(14):
-        root = dump()
         try:
             find_node(root, label, starts=starts)
             return root
         except AssertionError:
-            current = scroll_position(root)
-            if current == previous:
+            root, moved = scroll_step(forward=True, root=root)
+            if not moved:
                 break
-            previous = current
-            scroll_down()
     capture_failure('control-not-reached-' + re.sub(r'[^a-z0-9]+','-',label.lower()).strip('-')[:70])
     raise AssertionError('Control not reachable by native scrolling: ' + label)
 
