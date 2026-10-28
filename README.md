@@ -1,41 +1,36 @@
 # RWAdar para Android
 
-RWAdar es un radar gratuito de plataformas y activos tokenizados. Reúne fuentes,
-fechas y riesgos para ayudarte a consultar la información de cada empresa.
-La inversión se realiza con el proveedor; RWAdar no recibe ese dinero.
+Un radar gratuito de plataformas y activos tokenizados, con fuentes, fechas y riesgos.
+RWAdar informa: no recibe dinero ni tramita inversiones.
 
-- [Abrir la web](https://rwadar.pages.dev)
+- [Abrir la web sin registro](https://rwadar.pages.dev)
 - [Descargar la última versión Android](https://github.com/victorJorques/RWAdar-downloads/releases/latest)
 - [Privacidad y aviso legal](https://rwadar.pages.dev/privacidad)
 
-## Instalar la app
+## Instalar y entrar
 
-1. Abre la última versión publicada y descarga el archivo **RWAdar.apk**.
-2. Abre el archivo en un móvil Android 7.0 o posterior y sigue las indicaciones
-   de instalación del dispositivo. Conserva activas sus protecciones de seguridad.
-3. Abre RWAdar con conexión a internet para cargar el catálogo actualizado.
+1. Descarga **RWAdar.apk** desde la última versión publicada.
+2. Ábrelo en Android 7.0 o posterior y sigue las indicaciones del dispositivo, conservando sus protecciones de seguridad.
+3. En la app 1.4.0, entra con una cuenta gratuita confirmada. La web permite consultar el catálogo sin registro.
 
-La app se distribuye directamente como APK firmado. Todavía no está publicada
-en Google Play ni en la App Store. En iPhone puedes usar la web desde Safari
-y añadirla a la pantalla de inicio.
+La confirmación del correo y la recuperación de acceso se completan en la web.
+Después vuelve a entrar en la app. La sesión se conserva de forma segura hasta que cierres sesión o se invalide. En Perfil puedes activar «Desbloquear con la seguridad del móvil» para usar la huella, la cara compatible o el PIN del teléfono; RWAdar no conoce esos datos.
 
-Consulta gratuita, búsqueda, fichas con fuentes y favoritos guardados en tu
-dispositivo. Desde la versión **1.3.0**, puedes crear una cuenta gratuita y
-opcional desde Perfil, usando la misma cuenta y lista de vigilancia que en
-la web. El catálogo no requiere registro. La app no muestra anuncios ni
-tramita inversiones; la inclusión editorial de las empresas también es gratuita.
+## Qué incluye la 1.4.0
 
-La confirmación de correo y la recuperación de acceso se completan en la web;
-después puedes volver a entrar en la app. La sesión no se guarda entre arranques.
-Los favoritos locales y el progreso de Academy permanecen en tu dispositivo,
-separados de la lista de vigilancia de tu cuenta. Si un correo de acceso no
-aparece, revisa también spam: la entregabilidad aún requiere mejoras.
+- Radar, búsqueda y fichas con fuentes, fechas e ilustraciones editoriales identificadas como IA.
+- Academy con lecciones y un tutorial 3D guiado en cuatro pasos.
+- Un registro manual de inversiones: compra, unidades, costes, valoración y cobros. El resultado depende de los datos que anotes; no se conecta con intermediarios ni actualiza precios automáticamente.
 
-Las actualizaciones se descargan desde esta misma página. La firma permanece
-constante y cada versión incluye su suma SHA-256 para comprobar el archivo.
-Las pruebas del emulador se publican en la pestaña Actions.
+Los favoritos, el progreso de Academy y el registro de inversiones permanecen en el dispositivo.
+El registro de inversiones se separa por cuenta; la lista de vigilancia se sincroniza con tu cuenta.
+
+La app se distribuye como APK firmado y conserva la firma de las versiones anteriores.
+Cada versión incluye sus sumas SHA-256 y un informe de validación sin datos de las cuentas de prueba.
+Las actualizaciones se descargan desde esta página.
+
+Todavía no está en Google Play ni en la App Store. En iPhone puedes consultar la web desde Safari.
 
 Soporte y correcciones: **RWAdar@protonmail.com**.
 
-Este repositorio contiene la distribución y sus comprobaciones. Todos los
-derechos sobre la aplicación y la selección editorial están reservados.
+Este repositorio contiene la distribución y sus comprobaciones. Todos los derechos sobre la aplicación y la selección editorial están reservados.
