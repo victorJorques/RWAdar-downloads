@@ -135,7 +135,7 @@ jobs:
           print('icono de notificación presente')
           PY
 
-      - name: Preparar el emulador (Android 15 con Google Play services) grabando la red
+      - name: Preparar el emulador (Android 15 con Google Play services, sin wifi) grabando la red
         shell: bash
         run: |
           set -euo pipefail
@@ -151,7 +151,7 @@ jobs:
           fi
           timeout 600 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;google_apis;x86_64' < /dev/null > /dev/null
           printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar142 -k 'system-images;android-35;google_apis;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar142.avd"
-          "$ANDROID_HOME/emulator/emulator" -avd rwadar142 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 3072 -tcpdump "$RUNNER_TEMP/red.pcap" > evidencia/emulador.log 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar142 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 3072 -feature -Wifi -feature -VirtioWifi -tcpdump "$RUNNER_TEMP/red.pcap" > evidencia/emulador.log 2>&1 &
           echo "EMU_PID=$!" >> "$GITHUB_ENV"
           timeout 240 adb wait-for-device
           timeout 300 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
@@ -161,6 +161,9 @@ jobs:
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
           adb shell getprop ro.build.version.release | tee evidencia/android.txt
+          # Sin wifi: la red activa tiene que ser la móvil simulada (la que graba -tcpdump).
+          adb shell dumpsys connectivity | grep -E 'NetworkAgentInfo\{' | head -5 | tee evidencia/red-activa.txt || true
+          if grep -q 'WIFI' evidencia/red-activa.txt; then echo 'El wifi sigue activo: la grabación no vería el tráfico'; exit 1; fi
           # Deja que el sistema haga sus conexiones de arranque antes de medir.
           sleep 60
           date +%s.%N > evidencia/t0.txt
@@ -216,9 +219,85 @@ jobs:
           sleep 10
           kill "$EMU_PID" 2>/dev/null || true
           test -s "$RUNNER_TEMP/red.pcap"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark > /dev/null
-          tshark -r "$RUNNER_TEMP/red.pcap" -Y 'dns.flags.response == 0 || tls.handshake.type == 1' \
-            -T fields -e frame.time_epoch -e dns.qry.name -e tls.handshake.extensions_server_name -E separator='|' > evidencia/nombres.txt 2>/dev/null
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet dpkt==1.9.8
+          cat > "$RUNNER_TEMP/analizar_red.py" <<'ANALIZADOR'
+          """Lee una grabación pcap del emulador y saca, con su hora, los nombres que
+          la red revela sin descifrar nada: consultas DNS y el SNI de cada TLS
+          ClientHello (TCP). Uso: python3 analizar_red.py red.pcap > nombres.txt
+          Cada línea: «hora|nombre|origen» (origen = dns o sni)."""
+          import socket
+          import struct
+          import sys
+
+          import dpkt
+
+
+          def sni_de(payload):
+              # Registro TLS de handshake (0x16), ClientHello (0x01).
+              if len(payload) < 43 or payload[0] != 0x16 or payload[5] != 0x01:
+                  return None
+              try:
+                  p = 5 + 4            # cabecera de registro + cabecera de handshake
+                  p += 2 + 32          # versión + aleatorio
+                  p += 1 + payload[p]  # id de sesión
+                  (n,) = struct.unpack('!H', payload[p:p + 2]); p += 2 + n   # suites
+                  p += 1 + payload[p]  # compresión
+                  (total,) = struct.unpack('!H', payload[p:p + 2]); p += 2
+                  fin = min(p + total, len(payload))
+                  while p + 4 <= fin:
+                      tipo, largo = struct.unpack('!HH', payload[p:p + 4]); p += 4
+                      if tipo == 0 and p + 5 <= fin:  # server_name
+                          (lnom,) = struct.unpack('!H', payload[p + 3:p + 5])
+                          return payload[p + 5:p + 5 + lnom].decode('ascii', 'replace').lower()
+                      p += largo
+              except (IndexError, struct.error):
+                  return None
+              return None
+
+
+          def main(ruta):
+              with open(ruta, 'rb') as f:
+                  try:
+                      lector = dpkt.pcap.Reader(f)
+                  except ValueError:
+                      f.seek(0)
+                      lector = dpkt.pcapng.Reader(f)
+                  enlace = lector.datalink()
+                  for ts, buf in lector:
+                      try:
+                          if enlace == dpkt.pcap.DLT_EN10MB:
+                              ip = dpkt.ethernet.Ethernet(buf).data
+                          elif enlace in (dpkt.pcap.DLT_RAW, 12, 101):
+                              ip = dpkt.ip.IP(buf) if (buf[0] >> 4) == 4 else dpkt.ip6.IP6(buf)
+                          elif enlace == 113:  # Linux cooked
+                              ip = dpkt.sll.SLL(buf).data
+                          else:
+                              continue
+                      except Exception:
+                          continue
+                      if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
+                          continue
+                      capa = ip.data
+                      if isinstance(capa, dpkt.udp.UDP) and capa.dport == 53:
+                          try:
+                              dns = dpkt.dns.DNS(capa.data)
+                          except Exception:
+                              continue
+                          if dns.qr == dpkt.dns.DNS_Q:
+                              for q in dns.qd:
+                                  print(f'{ts:.6f}|{q.name.lower()}|dns')
+                      elif isinstance(capa, dpkt.tcp.TCP) and capa.data:
+                          nombre = sni_de(bytes(capa.data))
+                          if nombre:
+                              print(f'{ts:.6f}|{nombre}|sni')
+
+
+          if __name__ == '__main__':
+              main(sys.argv[1])
+          ANALIZADOR
+          "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/analizar_red.py" "$RUNNER_TEMP/red.pcap" > evidencia/nombres.txt
+          echo "Nombres grabados: $(wc -l < evidencia/nombres.txt)"
           python3 - <<'PY'
           import json, re
           t0 = float(open('evidencia/t0.txt').read()); t1 = float(open('evidencia/t1.txt').read()); t2 = float(open('evidencia/t2.txt').read())
@@ -228,7 +307,7 @@ jobs:
               if len(partes) < 3 or not partes[0]:
                   continue
               ts = float(partes[0])
-              nombres = {n.strip().lower() for n in (partes[1] + ',' + partes[2]).split(',') if n.strip()}
+              nombres = {partes[1].strip().lower()} if partes[1].strip() else set()
               clave = 'sistema_antes' if ts < t0 else 'con_141' if ts < t1 else 'con_142'
               ventanas[clave] |= nombres
           for k, v in ventanas.items():
