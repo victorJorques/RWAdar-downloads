@@ -6,8 +6,8 @@ run-name: RWAdar 1.4.2 APK24 ${{ inputs.apk_sha256 }} publicar=${{ inputs.public
 #
 # Comprobaciones:
 #   1. identidad: tamaño, SHA-256, misma firma que las versiones anteriores,
-#      paquete, versión, permisos (los de la 1.4.1 más los 4 de las
-#      notificaciones, ni uno más), Firebase sin arranque automático y el
+#      paquete, versión, permisos (los de la 1.4.1 más los 3 de las
+#      notificaciones, ni uno más), icono de notificación, Firebase sin arranque automático y el
 #      google-services del proyecto rwadar-14e3d;
 #   2. emulador Android 15 con Google Play services: instala la 1.4.1 de la
 #      release, la abre, instala encima la 1.4.2 SIN desinstalar, la abre;
@@ -88,11 +88,12 @@ jobs:
           grep -F "package: name='com.rwadar.app' versionCode='24' versionName='1.4.2'" evidencia/paquete.txt
           grep -F "package: name='com.rwadar.app' versionCode='23' versionName='1.4.1'" evidencia/paquete-141.txt
 
-          # Permisos: exactamente los de la 1.4.1 más los cuatro de las notificaciones.
+          # Permisos: exactamente los de la 1.4.1 más los tres de las notificaciones.
+          # RECEIVE_BOOT_COMPLETED sigue fuera (no hay notificaciones locales programadas).
           permisos() { grep '^uses-permission:' "$1" | sed -E "s/^uses-permission: name='([^']+)'.*/\1/" | sort -u; }
           permisos evidencia/paquete-141.txt > evidencia/permisos-141.txt
           permisos evidencia/paquete.txt > evidencia/permisos-142.txt
-          { cat evidencia/permisos-141.txt; printf '%s\n' android.permission.POST_NOTIFICATIONS com.google.android.c2dm.permission.RECEIVE android.permission.WAKE_LOCK android.permission.RECEIVE_BOOT_COMPLETED; } | sort -u > evidencia/permisos-esperados.txt
+          { cat evidencia/permisos-141.txt; printf '%s\n' android.permission.POST_NOTIFICATIONS com.google.android.c2dm.permission.RECEIVE android.permission.WAKE_LOCK; } | sort -u > evidencia/permisos-esperados.txt
           echo "Permisos 1.4.1:"; cat evidencia/permisos-141.txt
           echo "Diferencia con lo esperado (vacío = bien):"
           diff evidencia/permisos-esperados.txt evidencia/permisos-142.txt
@@ -130,6 +131,8 @@ jobs:
           assert proyecto == os.environ['FIREBASE_PROYECTO'], 'google-services no es del proyecto esperado'
           assert runtime == '1.4.2(24)', 'runtime de OTA inesperado'
           assert app_id, 'falta google_app_id'
+          assert re.search(r'com\.rwadar\.app:drawable/notification_icon', t), 'falta el icono de la notificación'
+          print('icono de notificación presente')
           PY
 
       - name: Preparar el emulador (Android 15 con Google Play services) grabando la red
@@ -252,7 +255,7 @@ jobs:
             'android': open('evidencia/android.txt').read().strip(),
             'comprobado': [
               'firma igual a las versiones anteriores', 'paquete com.rwadar.app, versión 1.4.2, código 24',
-              'permisos = los de la 1.4.1 + POST_NOTIFICATIONS, c2dm RECEIVE, WAKE_LOCK, RECEIVE_BOOT_COMPLETED',
+              'permisos = los de la 1.4.1 + POST_NOTIFICATIONS, c2dm RECEIVE, WAKE_LOCK (sin RECEIVE_BOOT_COMPLETED)', 'icono propio de notificación',
               'firebase_messaging_auto_init_enabled y firebase_analytics_collection_enabled = false',
               'google-services del proyecto rwadar-14e3d; runtime de OTA 1.4.2(24)',
               'emulador con Google Play services: 1.4.1 instalada y abierta; 1.4.2 instalada encima sin desinstalar; dos aperturas en frío sin cierres',
