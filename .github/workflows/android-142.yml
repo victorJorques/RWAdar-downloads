@@ -1,0 +1,330 @@
+name: RWAdar 1.4.2 - comprobar en emulador y publicar
+run-name: RWAdar 1.4.2 APK24 ${{ inputs.apk_sha256 }} publicar=${{ inputs.publicar }}
+
+# Comprueba el APK 1.4.2 (código 24) compilado en EAS y, solo si se pide y
+# todo pasa en esta misma ejecución, publica la release v1.4.2.
+#
+# Comprobaciones:
+#   1. identidad: tamaño, SHA-256, misma firma que las versiones anteriores,
+#      paquete, versión, permisos (los de la 1.4.1 más los 4 de las
+#      notificaciones, ni uno más), Firebase sin arranque automático y el
+#      google-services del proyecto rwadar-14e3d;
+#   2. emulador Android 15 con Google Play services: instala la 1.4.1 de la
+#      release, la abre, instala encima la 1.4.2 SIN desinstalar, la abre;
+#      ningún cierre inesperado; capturas de pantalla;
+#   3. red: el emulador graba todo su tráfico; tras abrir la 1.4.2 no puede
+#      aparecer ningún dominio de Firebase Installations, registro de FCM,
+#      Analytics ni Crashlytics (la app no pide nada a Firebase hasta que la
+#      persona pulsa «Notificaciones en este móvil»).
+#
+# No usa cuentas ni secretos. La publicación usa solo el GITHUB_TOKEN de este
+# repositorio.
+
+on:
+  workflow_dispatch:
+    inputs:
+      apk_url:
+        description: URL anónima del APK de EAS (https://expo.dev/artifacts/eas/....apk)
+        required: true
+        type: string
+      apk_sha256:
+        description: SHA-256 exacto del APK
+        required: true
+        type: string
+      apk_bytes:
+        description: Tamaño exacto en bytes
+        required: true
+        type: string
+      publicar:
+        description: Publicar la release v1.4.2 si todo pasa
+        required: true
+        default: 'no'
+        type: choice
+        options: ['no', 'si']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rwadar-apk24
+  cancel-in-progress: false
+
+env:
+  APK_URL: ${{ inputs.apk_url }}
+  APK_SHA256: ${{ inputs.apk_sha256 }}
+  APK_BYTES: ${{ inputs.apk_bytes }}
+  CERT_SHA256: f506dea70ad644184161542d583455d2ad849c4dea3fffa0469c9ca400f58b72
+  BASE_URL: https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.4.1/RWAdar.apk
+  BASE_SHA256: 33663d489ff759b66d2a06e53989a6e7bdddd2b0005c7cf25bf46c968c9c6f63
+  FIREBASE_PROYECTO: rwadar-14e3d
+
+jobs:
+  comprobar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Descargar la 1.4.1 y la 1.4.2 y comprobar su identidad
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p evidencia
+          BT="$ANDROID_HOME/build-tools/36.0.0"
+          [[ "$APK_URL" == https://expo.dev/artifacts/eas/*.apk ]]
+          [[ "$APK_SHA256" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$APK_BYTES" =~ ^[1-9][0-9]{6,8}$ ]]
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 --retry 2 "$APK_URL" -o rwadar.apk
+          test "$(stat -c '%s' rwadar.apk)" = "$APK_BYTES"
+          printf '%s  rwadar.apk\n' "$APK_SHA256" | sha256sum --check
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 --retry 2 "$BASE_URL" -o base141.apk
+          printf '%s  base141.apk\n' "$BASE_SHA256" | sha256sum --check
+
+          # Misma firma que todas las versiones anteriores.
+          "$BT/apksigner" verify --verbose --print-certs rwadar.apk > evidencia/firma.txt
+          grep -F "$CERT_SHA256" evidencia/firma.txt
+          "$BT/apksigner" verify --print-certs base141.apk | grep -F "$CERT_SHA256"
+
+          "$BT/aapt" dump badging rwadar.apk > evidencia/paquete.txt
+          "$BT/aapt" dump badging base141.apk > evidencia/paquete-141.txt
+          grep -F "package: name='com.rwadar.app' versionCode='24' versionName='1.4.2'" evidencia/paquete.txt
+          grep -F "package: name='com.rwadar.app' versionCode='23' versionName='1.4.1'" evidencia/paquete-141.txt
+
+          # Permisos: exactamente los de la 1.4.1 más los cuatro de las notificaciones.
+          permisos() { grep '^uses-permission:' "$1" | sed -E "s/^uses-permission: name='([^']+)'.*/\1/" | sort -u; }
+          permisos evidencia/paquete-141.txt > evidencia/permisos-141.txt
+          permisos evidencia/paquete.txt > evidencia/permisos-142.txt
+          { cat evidencia/permisos-141.txt; printf '%s\n' android.permission.POST_NOTIFICATIONS com.google.android.c2dm.permission.RECEIVE android.permission.WAKE_LOCK android.permission.RECEIVE_BOOT_COMPLETED; } | sort -u > evidencia/permisos-esperados.txt
+          echo "Permisos 1.4.1:"; cat evidencia/permisos-141.txt
+          echo "Diferencia con lo esperado (vacío = bien):"
+          diff evidencia/permisos-esperados.txt evidencia/permisos-142.txt
+
+          # Firebase sin arranque automático, dentro de <application>.
+          "$BT/aapt" dump xmltree rwadar.apk AndroidManifest.xml > evidencia/manifiesto.txt
+          python3 - <<'PY'
+          import re
+          t = open('evidencia/manifiesto.txt', encoding='utf-8').read()
+          for clave in ('firebase_messaging_auto_init_enabled', 'firebase_analytics_collection_enabled'):
+              m = re.search(r'A: android:name\([^)]*\)="' + clave + r'"[^\n]*\n\s*A: android:value\([^)]*\)=([^\n]*)', t)
+              assert m, f'falta {clave}'
+              valor = m.group(1)
+              assert 'false' in valor.lower() or '(type 0x12)0x0' in valor, f'{clave} no es false: {valor}'
+              print(clave, '->', valor.strip())
+          PY
+
+          # google-services del proyecto correcto y runtime de OTA.
+          "$BT/aapt" dump --values resources rwadar.apk > evidencia/recursos.txt
+          python3 - <<'PY'
+          import os, re
+          t = open('evidencia/recursos.txt', encoding='utf-8', errors='replace').read()
+          def valor(nombre):
+              # Formato de «aapt dump --values resources»:
+              #   resource 0x7f0f001c com.rwadar.app:string/NOMBRE: t=0x03 d=...
+              #     (string8) "valor"
+              m = re.search(r'\n\s*resource 0x[0-9a-f]+ com\.rwadar\.app:string/' + re.escape(nombre) + r': t=[^\n]*\n\s*\(string\d*\) "([^"]*)"', t)
+              return m.group(1) if m else None
+          proyecto = valor('project_id')
+          runtime = valor('expo_runtime_version')
+          app_id = valor('google_app_id')
+          print('project_id =', proyecto)
+          print('expo_runtime_version =', runtime)
+          print('google_app_id presente =', bool(app_id))
+          assert proyecto == os.environ['FIREBASE_PROYECTO'], 'google-services no es del proyecto esperado'
+          assert runtime == '1.4.2(24)', 'runtime de OTA inesperado'
+          assert app_id, 'falta google_app_id'
+          PY
+
+      - name: Preparar el emulador (Android 15 con Google Play services) grabando la red
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator:$PATH"
+          printf '%s\n' "$ANDROID_HOME/platform-tools" "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+          export ANDROID_USER_HOME="$RUNNER_TEMP/rwadar-android"
+          export ANDROID_AVD_HOME="$ANDROID_USER_HOME/avd"
+          mkdir -p "$ANDROID_AVD_HOME"
+          printf 'ANDROID_USER_HOME=%s\nANDROID_AVD_HOME=%s\n' "$ANDROID_USER_HOME" "$ANDROID_AVD_HOME" >> "$GITHUB_ENV"
+          test -c /dev/kvm
+          if ! test -r /dev/kvm || ! test -w /dev/kvm; then
+            sudo setfacl -m "u:$(id -un):rw" /dev/kvm
+          fi
+          timeout 600 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;google_apis;x86_64' < /dev/null > /dev/null
+          printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar142 -k 'system-images;android-35;google_apis;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar142.avd"
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar142 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 3072 -tcpdump "$RUNNER_TEMP/red.pcap" > evidencia/emulador.log 2>&1 &
+          echo "EMU_PID=$!" >> "$GITHUB_ENV"
+          timeout 240 adb wait-for-device
+          timeout 300 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb shell getprop ro.build.version.release | tee evidencia/android.txt
+          # Deja que el sistema haga sus conexiones de arranque antes de medir.
+          sleep 60
+          date +%s.%N > evidencia/t0.txt
+
+      - name: Instalar la 1.4.1, abrirla, actualizar encima a la 1.4.2 y abrirla
+        shell: bash
+        run: |
+          set -euo pipefail
+          abrir() { adb shell monkey -p com.rwadar.app -c android.intent.category.LAUNCHER 1 > /dev/null; }
+          adb install --no-streaming base141.apk
+          adb logcat -c
+          abrir
+          sleep 45
+          adb exec-out screencap -p > evidencia/1-141-abierta.png
+          adb shell pidof com.rwadar.app
+          adb shell am force-stop com.rwadar.app
+          sleep 5
+          date +%s.%N > evidencia/t1.txt
+
+          # Actualización en el sitio: sin desinstalar, misma firma.
+          adb install -r --no-streaming rwadar.apk | tee evidencia/actualizar.txt
+          grep -Fx 'Success' evidencia/actualizar.txt
+          adb shell dumpsys package com.rwadar.app | grep -E 'versionName=|versionCode=' | tee evidencia/version-instalada.txt
+          grep -F 'versionName=1.4.2' evidencia/version-instalada.txt
+          abrir
+          sleep 75
+          adb exec-out screencap -p > evidencia/2-142-abierta.png
+          adb shell pidof com.rwadar.app | tee evidencia/pid.txt
+          test -s evidencia/pid.txt
+          adb shell dumpsys activity activities | grep -E 'ResumedActivity' | tee evidencia/actividad.txt
+          grep -F 'com.rwadar.app' evidencia/actividad.txt
+          # Una segunda apertura en frío.
+          adb shell am force-stop com.rwadar.app
+          abrir
+          sleep 45
+          adb exec-out screencap -p > evidencia/3-142-segunda.png
+          adb shell pidof com.rwadar.app
+          # La app no pidió el permiso de notificaciones por su cuenta.
+          adb shell dumpsys package com.rwadar.app | grep -A1 'android.permission.POST_NOTIFICATIONS' | tee evidencia/permiso-notificaciones.txt || true
+          if grep -q 'granted=true' evidencia/permiso-notificaciones.txt; then echo 'Se concedió el permiso de notificaciones sin pulsar nada'; exit 1; fi
+          date +%s.%N > evidencia/t2.txt
+          # Ningún cierre inesperado de RWAdar en todo el recorrido.
+          adb logcat -d -b crash > evidencia/cierres.txt || true
+          if grep -q 'com.rwadar.app' evidencia/cierres.txt; then cat evidencia/cierres.txt; exit 1; fi
+          adb logcat -d -s FirebaseApp FirebaseInstallations FirebaseMessaging FirebaseInitProvider > evidencia/firebase-logcat.txt || true
+          echo '--- registro de Firebase en la app ---'; cat evidencia/firebase-logcat.txt
+
+      - name: Analizar la red grabada
+        shell: bash
+        run: |
+          set -euo pipefail
+          adb emu kill || true
+          sleep 10
+          kill "$EMU_PID" 2>/dev/null || true
+          test -s "$RUNNER_TEMP/red.pcap"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark > /dev/null
+          tshark -r "$RUNNER_TEMP/red.pcap" -Y 'dns.flags.response == 0 || tls.handshake.type == 1' \
+            -T fields -e frame.time_epoch -e dns.qry.name -e tls.handshake.extensions_server_name -E separator='|' > evidencia/nombres.txt 2>/dev/null
+          python3 - <<'PY'
+          import json, re
+          t0 = float(open('evidencia/t0.txt').read()); t1 = float(open('evidencia/t1.txt').read()); t2 = float(open('evidencia/t2.txt').read())
+          ventanas = {'sistema_antes': set(), 'con_141': set(), 'con_142': set()}
+          for linea in open('evidencia/nombres.txt', encoding='utf-8', errors='replace'):
+              partes = linea.rstrip('\n').split('|')
+              if len(partes) < 3 or not partes[0]:
+                  continue
+              ts = float(partes[0])
+              nombres = {n.strip().lower() for n in (partes[1] + ',' + partes[2]).split(',') if n.strip()}
+              clave = 'sistema_antes' if ts < t0 else 'con_141' if ts < t1 else 'con_142'
+              ventanas[clave] |= nombres
+          for k, v in ventanas.items():
+              print(f'== {k} ({len(v)})'); [print('  ', n) for n in sorted(v)]
+          prohibidos = re.compile(r'(firebaseinstallations\.googleapis\.com|fcmregistrations\.googleapis\.com|fcmtoken\.googleapis\.com|firebase-settings\.crashlytics\.com|crashlyticsreports|app-measurement\.com|firebaselogging|firebaseremoteconfig)')
+          malos = sorted(n for n in ventanas['con_142'] if prohibidos.search(n))
+          json.dump({k: sorted(v) for k, v in ventanas.items()} | {'firebase_tras_abrir_142': malos}, open('evidencia/red.json', 'w'), indent=1)
+          assert ventanas['con_142'], 'no se grabó tráfico mientras la 1.4.2 estaba abierta: la prueba no vale'
+          assert not malos, f'la 1.4.2 contactó con Firebase sin pulsar nada: {malos}'
+          print('Sin conexiones a Firebase tras abrir la 1.4.2.')
+          PY
+
+      - name: Informe QA-1.4.2.json
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, os
+          red = json.load(open('evidencia/red.json'))
+          informe = {
+            'esquema': 1, 'version': '1.4.2', 'versionCode': 24, 'apkSha256': os.environ['APK_SHA256'], 'apkBytes': int(os.environ['APK_BYTES']),
+            'certificadoSha256': os.environ['CERT_SHA256'], 'firebaseProyecto': os.environ['FIREBASE_PROYECTO'],
+            'ejecucion': f"https://github.com/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}",
+            'android': open('evidencia/android.txt').read().strip(),
+            'comprobado': [
+              'firma igual a las versiones anteriores', 'paquete com.rwadar.app, versión 1.4.2, código 24',
+              'permisos = los de la 1.4.1 + POST_NOTIFICATIONS, c2dm RECEIVE, WAKE_LOCK, RECEIVE_BOOT_COMPLETED',
+              'firebase_messaging_auto_init_enabled y firebase_analytics_collection_enabled = false',
+              'google-services del proyecto rwadar-14e3d; runtime de OTA 1.4.2(24)',
+              'emulador con Google Play services: 1.4.1 instalada y abierta; 1.4.2 instalada encima sin desinstalar; dos aperturas en frío sin cierres',
+              'sin permiso de notificaciones concedido sin pulsar',
+              'sin conexiones a Firebase Installations, FCM, Analytics ni Crashlytics tras abrir la 1.4.2',
+            ],
+            'noComprobado': [
+              'teléfono físico', 'sesión con cuenta (la prueba no usa cuentas)', 'recibir una notificación real (los avisos siguen apagados)',
+            ],
+            'dominiosCon142': red['con_142'],
+          }
+          json.dump(informe, open('evidencia/QA-1.4.2.json', 'w'), ensure_ascii=False, indent=1)
+          print(json.dumps(informe, ensure_ascii=False, indent=1))
+          PY
+
+      - name: Guardar la evidencia (capturas, red, informe)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: evidencia-142
+          path: evidencia/
+          retention-days: 30
+
+  publicar:
+    needs: comprobar
+    if: ${{ inputs.publicar == 'si' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Recuperar el informe de la comprobación
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: evidencia-142
+          path: evidencia
+      - name: Descargar otra vez el mismo APK y publicar v1.4.2
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p sale
+          curl --fail --location --proto '=https' --proto-redir '=https' --max-time 300 --retry 2 "$APK_URL" -o sale/RWAdar.apk
+          test "$(stat -c '%s' sale/RWAdar.apk)" = "$APK_BYTES"
+          printf '%s  sale/RWAdar.apk\n' "$APK_SHA256" | sha256sum --check
+          cp evidencia/QA-1.4.2.json sale/QA-1.4.2.json
+          printf '%s' '{"plataforma":"android","version":"1.4.2","versionCode":24,"apk":"https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.4.2/RWAdar.apk"}' > sale/version-android.json
+          (cd sale && sha256sum RWAdar.apk QA-1.4.2.json version-android.json > SHA256SUMS.txt && cat SHA256SUMS.txt)
+          cat > notas.md <<'NOTAS'
+          # RWAdar 1.4.2 para Android
+
+          **Si ya tienes RWAdar, no la desinstales.** Descarga **RWAdar.apk**, ábrelo y pulsa **Actualizar**. Conservas tu cuenta, la sesión y tus datos.
+
+          - **Preparada para las notificaciones del móvil.** Cuando RWAdar active los avisos de novedades, podrás recibirlos también como notificación si lo pides en Perfil › «Notificaciones en este móvil». La app no pide permiso al abrirse: solo cuando pulsas ese botón, y puedes quitarlo cuando quieras en Perfil o en los ajustes del teléfono.
+          - Hasta que se activen esos avisos, la app funciona igual que la 1.4.1.
+          - A partir de esta versión, las mejoras automáticas llegan a la 1.4.2. La 1.4.1 sigue funcionando y te avisará de que hay versión nueva.
+
+          Android 7.0 o posterior. Versión 1.4.2, código 24, con la misma firma que las anteriores. Se adjuntan **SHA256SUMS.txt** y **QA-1.4.2.json**, con lo comprobado en un emulador Android y lo que no se ha podido comprobar.
+
+          RWAdar informa; no recibe dinero ni tramita inversiones.
+          NOTAS
+          gh release create v1.4.2 --repo "$GITHUB_REPOSITORY" --target main --title 'RWAdar 1.4.2' --notes-file notas.md --latest \
+            sale/RWAdar.apk sale/SHA256SUMS.txt sale/QA-1.4.2.json sale/version-android.json
+      - name: Comprobar la descarga pública
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 20
+          esperado='{"plataforma":"android","version":"1.4.2","versionCode":24,"apk":"https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.4.2/RWAdar.apk"}'
+          recibido="$(curl --fail --silent --location --max-time 60 https://github.com/victorJorques/RWAdar-downloads/releases/latest/download/version-android.json)"
+          test "$recibido" = "$esperado"
+          curl --fail --silent --location --max-time 300 https://github.com/victorJorques/RWAdar-downloads/releases/download/v1.4.2/RWAdar.apk -o publicado.apk
+          printf '%s  publicado.apk\n' "$APK_SHA256" | sha256sum --check
+          echo "Publicada: la última versión anuncia la 1.4.2 y el APK público coincide byte a byte."
