@@ -12,7 +12,8 @@ run-name: RWAdar 1.4.2 APK24 ${{ inputs.apk_sha256 }} publicar=${{ inputs.public
 #   2. emulador Android 15 con Google Play services: instala la 1.4.1 de la
 #      release, la abre, instala encima la 1.4.2 SIN desinstalar, la abre;
 #      ningún cierre inesperado; capturas de pantalla;
-#   3. red: el emulador graba todo su tráfico; tras abrir la 1.4.2 no puede
+#   3. red: el tráfico del móvil pasa por un proxy que apunta cada servidor
+#      (sin descifrar nada); tras abrir la 1.4.2 no puede
 #      aparecer ningún dominio de Firebase Installations, registro de FCM,
 #      Analytics ni Crashlytics (la app no pide nada a Firebase hasta que la
 #      persona pulsa «Notificaciones en este móvil»).
@@ -135,7 +136,7 @@ jobs:
           print('icono de notificación presente')
           PY
 
-      - name: Preparar el emulador (Android 15 con Google Play services, sin wifi) grabando la red
+      - name: Preparar el emulador (Android 15 con Google Play services) y apuntar sus conexiones
         shell: bash
         run: |
           set -euo pipefail
@@ -151,7 +152,7 @@ jobs:
           fi
           timeout 600 "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" 'platform-tools' 'platforms;android-35' 'emulator' 'system-images;android-35;google_apis;x86_64' < /dev/null > /dev/null
           printf 'no\n' | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd -n rwadar142 -k 'system-images;android-35;google_apis;x86_64' --device pixel_6 --path "$ANDROID_AVD_HOME/rwadar142.avd"
-          "$ANDROID_HOME/emulator/emulator" -avd rwadar142 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 3072 -feature -Wifi -feature -VirtioWifi -tcpdump "$RUNNER_TEMP/red.pcap" > evidencia/emulador.log 2>&1 &
+          "$ANDROID_HOME/emulator/emulator" -avd rwadar142 -no-window -no-audio -no-boot-anim -no-snapshot -gpu swiftshader_indirect -accel on -memory 3072 > evidencia/emulador.log 2>&1 &
           echo "EMU_PID=$!" >> "$GITHUB_ENV"
           timeout 240 adb wait-for-device
           timeout 300 bash -c 'until [[ "$(adb shell getprop sys.boot_completed | tr -d "\r")" == 1 ]]; do sleep 2; done'
@@ -161,9 +162,95 @@ jobs:
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
           adb shell getprop ro.build.version.release | tee evidencia/android.txt
-          # Sin wifi: la red activa tiene que ser la móvil simulada (la que graba -tcpdump).
-          adb shell dumpsys connectivity | grep -E 'NetworkAgentInfo\{' | head -5 | tee evidencia/red-activa.txt || true
-          if grep -q 'WIFI' evidencia/red-activa.txt; then echo 'El wifi sigue activo: la grabación no vería el tráfico'; exit 1; fi
+          # Todo el tráfico HTTP(S) del móvil pasa por un proxy del runner que solo
+          # apunta a qué servidor se conecta cada vez (no descifra nada). Firebase
+          # usa las conexiones estándar de Android, que respetan este proxy.
+          cat > "$RUNNER_TEMP/proxy_registro.py" <<'PROXY'
+          """Proxy HTTP mínimo que deja pasar el tráfico del emulador y apunta, con su
+          hora, a qué servidor se conecta cada vez. No descifra nada: en HTTPS solo ve
+          el «CONNECT servidor:puerto». Uso: python3 proxy_registro.py PUERTO registro.txt
+          Cada línea del registro: «hora|servidor|proxy»."""
+          import asyncio
+          import sys
+          import time
+
+          PUERTO = int(sys.argv[1])
+          REGISTRO = open(sys.argv[2], 'a', buffering=1, encoding='utf-8')
+
+
+          def apuntar(servidor):
+              REGISTRO.write(f'{time.time():.6f}|{servidor.lower()}|proxy\n')
+
+
+          async def bombear(lector, escritor):
+              try:
+                  while True:
+                      datos = await lector.read(65536)
+                      if not datos:
+                          break
+                      escritor.write(datos)
+                      await escritor.drain()
+              except Exception:
+                  pass
+              finally:
+                  try:
+                      escritor.close()
+                  except Exception:
+                      pass
+
+
+          async def atender(lector, escritor):
+              try:
+                  cabecera = await asyncio.wait_for(lector.readuntil(b'\r\n\r\n'), 30)
+              except Exception:
+                  escritor.close()
+                  return
+              linea = cabecera.split(b'\r\n', 1)[0].decode('latin1')
+              partes = linea.split(' ')
+              if len(partes) < 3:
+                  escritor.close()
+                  return
+              metodo, destino = partes[0].upper(), partes[1]
+              try:
+                  if metodo == 'CONNECT':
+                      servidor, _, puerto = destino.rpartition(':')
+                      apuntar(servidor)
+                      r2, w2 = await asyncio.wait_for(asyncio.open_connection(servidor, int(puerto)), 20)
+                      escritor.write(b'HTTP/1.1 200 Connection established\r\n\r\n')
+                      await escritor.drain()
+                  else:
+                      # Petición HTTP normal con URL absoluta: http://servidor[:puerto]/ruta
+                      resto = destino.split('://', 1)[-1]
+                      hostport, _, ruta = resto.partition('/')
+                      servidor, _, puerto = hostport.partition(':')
+                      apuntar(servidor)
+                      r2, w2 = await asyncio.wait_for(asyncio.open_connection(servidor, int(puerto or 80)), 20)
+                      # Al servidor se le pide la ruta normal, no la URL completa.
+                      primera, _, demas = cabecera.partition(b'\r\n')
+                      w2.write(f'{partes[0]} /{ruta} {partes[2]}'.encode('latin1') + b'\r\n' + demas)
+                      await w2.drain()
+              except Exception:
+                  try:
+                      escritor.write(b'HTTP/1.1 502 Bad Gateway\r\n\r\n')
+                      escritor.close()
+                  except Exception:
+                      pass
+                  return
+              await asyncio.gather(bombear(lector, w2), bombear(r2, escritor))
+
+
+          async def principal():
+              servidor = await asyncio.start_server(atender, '127.0.0.1', PUERTO)
+              async with servidor:
+                  await servidor.serve_forever()
+
+          asyncio.run(principal())
+          PROXY
+          python3 "$RUNNER_TEMP/proxy_registro.py" 8888 "$GITHUB_WORKSPACE/evidencia/conexiones.txt" > evidencia/proxy.log 2>&1 &
+          echo "PROXY_PID=$!" >> "$GITHUB_ENV"
+          sleep 1
+          adb shell settings put global http_proxy 10.0.2.2:8888
+          adb shell settings get global http_proxy | tee evidencia/proxy-movil.txt
           # Deja que el sistema haga sus conexiones de arranque antes de medir.
           sleep 60
           date +%s.%N > evidencia/t0.txt
@@ -216,88 +303,10 @@ jobs:
         run: |
           set -euo pipefail
           adb emu kill || true
-          sleep 10
-          kill "$EMU_PID" 2>/dev/null || true
-          test -s "$RUNNER_TEMP/red.pcap"
-          python3 -m venv "$RUNNER_TEMP/venv"
-          "$RUNNER_TEMP/venv/bin/pip" install --quiet dpkt==1.9.8
-          cat > "$RUNNER_TEMP/analizar_red.py" <<'ANALIZADOR'
-          """Lee una grabación pcap del emulador y saca, con su hora, los nombres que
-          la red revela sin descifrar nada: consultas DNS y el SNI de cada TLS
-          ClientHello (TCP). Uso: python3 analizar_red.py red.pcap > nombres.txt
-          Cada línea: «hora|nombre|origen» (origen = dns o sni)."""
-          import socket
-          import struct
-          import sys
-
-          import dpkt
-
-
-          def sni_de(payload):
-              # Registro TLS de handshake (0x16), ClientHello (0x01).
-              if len(payload) < 43 or payload[0] != 0x16 or payload[5] != 0x01:
-                  return None
-              try:
-                  p = 5 + 4            # cabecera de registro + cabecera de handshake
-                  p += 2 + 32          # versión + aleatorio
-                  p += 1 + payload[p]  # id de sesión
-                  (n,) = struct.unpack('!H', payload[p:p + 2]); p += 2 + n   # suites
-                  p += 1 + payload[p]  # compresión
-                  (total,) = struct.unpack('!H', payload[p:p + 2]); p += 2
-                  fin = min(p + total, len(payload))
-                  while p + 4 <= fin:
-                      tipo, largo = struct.unpack('!HH', payload[p:p + 4]); p += 4
-                      if tipo == 0 and p + 5 <= fin:  # server_name
-                          (lnom,) = struct.unpack('!H', payload[p + 3:p + 5])
-                          return payload[p + 5:p + 5 + lnom].decode('ascii', 'replace').lower()
-                      p += largo
-              except (IndexError, struct.error):
-                  return None
-              return None
-
-
-          def main(ruta):
-              with open(ruta, 'rb') as f:
-                  try:
-                      lector = dpkt.pcap.Reader(f)
-                  except ValueError:
-                      f.seek(0)
-                      lector = dpkt.pcapng.Reader(f)
-                  enlace = lector.datalink()
-                  for ts, buf in lector:
-                      try:
-                          if enlace == dpkt.pcap.DLT_EN10MB:
-                              ip = dpkt.ethernet.Ethernet(buf).data
-                          elif enlace in (dpkt.pcap.DLT_RAW, 12, 101):
-                              ip = dpkt.ip.IP(buf) if (buf[0] >> 4) == 4 else dpkt.ip6.IP6(buf)
-                          elif enlace == 113:  # Linux cooked
-                              ip = dpkt.sll.SLL(buf).data
-                          else:
-                              continue
-                      except Exception:
-                          continue
-                      if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
-                          continue
-                      capa = ip.data
-                      if isinstance(capa, dpkt.udp.UDP) and capa.dport == 53:
-                          try:
-                              dns = dpkt.dns.DNS(capa.data)
-                          except Exception:
-                              continue
-                          if dns.qr == dpkt.dns.DNS_Q:
-                              for q in dns.qd:
-                                  print(f'{ts:.6f}|{q.name.lower()}|dns')
-                      elif isinstance(capa, dpkt.tcp.TCP) and capa.data:
-                          nombre = sni_de(bytes(capa.data))
-                          if nombre:
-                              print(f'{ts:.6f}|{nombre}|sni')
-
-
-          if __name__ == '__main__':
-              main(sys.argv[1])
-          ANALIZADOR
-          "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/analizar_red.py" "$RUNNER_TEMP/red.pcap" > evidencia/nombres.txt
-          echo "Nombres grabados: $(wc -l < evidencia/nombres.txt)"
+          sleep 5
+          kill "$EMU_PID" "$PROXY_PID" 2>/dev/null || true
+          cp evidencia/conexiones.txt evidencia/nombres.txt
+          echo "Conexiones apuntadas: $(wc -l < evidencia/nombres.txt)"
           python3 - <<'PY'
           import json, re
           t0 = float(open('evidencia/t0.txt').read()); t1 = float(open('evidencia/t1.txt').read()); t2 = float(open('evidencia/t2.txt').read())
@@ -339,7 +348,7 @@ jobs:
               'google-services del proyecto rwadar-14e3d; runtime de OTA 1.4.2(24)',
               'emulador con Google Play services: 1.4.1 instalada y abierta; 1.4.2 instalada encima sin desinstalar; dos aperturas en frío sin cierres',
               'sin permiso de notificaciones concedido sin pulsar',
-              'sin conexiones a Firebase Installations, FCM, Analytics ni Crashlytics tras abrir la 1.4.2',
+              'sin conexiones a Firebase Installations, FCM, Analytics ni Crashlytics tras abrir la 1.4.2 (proxy del sistema que apunta cada servidor)',
             ],
             'noComprobado': [
               'teléfono físico', 'sesión con cuenta (la prueba no usa cuentas)', 'recibir una notificación real (los avisos siguen apagados)',
